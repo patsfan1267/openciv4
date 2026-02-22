@@ -962,6 +962,11 @@ void CvSelectionGroup::startMission()
 	FAssert(getOwnerINLINE() != NO_PLAYER);
 	FAssert(headMissionQueueNode() != NULL);
 
+#ifndef OPENCIV4
+	// In the original game, missions are blocked if the player's turn isn't active.
+	// In headless mode (OpenCiv4), we never call setTurnActive() because it has too
+	// many GUI side effects. Instead we bypass this guard entirely — the headless
+	// game loop is single-threaded and processes one player at a time.
 	if (!GC.getGameINLINE().isMPOption(MPOPTION_SIMULTANEOUS_TURNS))
 	{
 		if (!GET_PLAYER(getOwnerINLINE()).isTurnActive())
@@ -977,6 +982,7 @@ void CvSelectionGroup::startMission()
 			return;
 		}
 	}
+#endif
 
 	if (canAllMove())
 	{

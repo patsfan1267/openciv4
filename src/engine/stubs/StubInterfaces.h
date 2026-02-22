@@ -882,8 +882,8 @@ public:
     void setSymbolID(int iID, int iValue) override {} // STUB
 
     // ---- Text / localization ----
-    CvWString getText(CvWString szIDTag, ...) override { return L""; } // STUB
-    CvWString getObjectText(CvWString szIDTag, uint uiForm, bool bNoSubs) override { return L""; } // STUB
+    CvWString getText(CvWString szIDTag, ...) override { return szIDTag; } // Return raw key
+    CvWString getObjectText(CvWString szIDTag, uint uiForm, bool bNoSubs) override { return szIDTag; } // Return raw key
     void addText(const TCHAR* szIDTag, const wchar* szString, const wchar* szGender, const wchar* szPlural) override {} // STUB
     uint getNumForms(CvWString szIDTag) override { return 0; } // STUB
 

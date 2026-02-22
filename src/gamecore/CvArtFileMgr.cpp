@@ -71,7 +71,8 @@ CvArtInfo##name##* CvArtFileMgr::get##name##ArtInfo( const char *szArtDefineTag 
 		FAssertMsg(false, szErrorMsg ); \
 		if ( 0 == strcmp(szArtDefineTag, "ERROR") ) \
 		{ \
-			return NULL; \
+			static CvArtInfo##name s_dummyArtInfo; \
+			return &s_dummyArtInfo; \
 		} \
 		else \
 		{ \

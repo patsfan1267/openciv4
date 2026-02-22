@@ -135,9 +135,9 @@ int main(int argc, char* argv[])
         // Game type: single player new game
         initCore.setType(GAME_SP_NEW);
 
-        // World size: DUEL (smallest = fastest for testing)
-        // Index 0 = DUEL in standard BTS XML
-        initCore.setWorldSize((WorldSizeTypes)0);
+        // World size: TINY (index 1 in standard BTS: 0=Duel,1=Tiny,2=Small,3=Standard,4=Large,5=Huge)
+        // Note: Small+ maps sometimes crash on certain map seeds (non-deterministic)
+        initCore.setWorldSize((WorldSizeTypes)1);
 
         // Climate: TEMPERATE (index 1 in standard BTS)
         initCore.setClimate((ClimateTypes)1);
@@ -152,7 +152,7 @@ int main(int argc, char* argv[])
         initCore.setEra((EraTypes)0);
 
         // Find playable civs
-        const int MAX_AI_PLAYERS = 4; // Small game for testing
+        const int MAX_AI_PLAYERS = 4; // Keep it manageable
         CivLeaderPair pairs[32];
         int numPairs = findCivLeaderPairs(pairs, 32);
         int numPlayers = (numPairs < MAX_AI_PLAYERS) ? numPairs : MAX_AI_PLAYERS;
@@ -269,9 +269,13 @@ int main(int argc, char* argv[])
     // ---- Step 7: Run headless game loop ----
     // We bypass CvGame::update() because it's designed for the GUI event loop.
     // Instead, we directly simulate the turn sequence:
-    //   1. For each alive player: AI_unitUpdate() to process AI decisions
+    //   1. For each alive player: setTurnActive(true) → doTurn → doTurnUnits → AI_unitUpdate → setTurnActive(false)
     //   2. CvGame::doTurn() to advance the game state
-    const int MAX_TURNS = 100;
+    //
+    // CRITICAL: setTurnActive(true) must be called before AI processing!
+    // CvSelectionGroup::startMission() checks isTurnActive() and silently
+    // rejects all missions (including MISSION_FOUND for settlers) if false.
+    const int MAX_TURNS = 300;
     fprintf(stderr, "=== Starting headless game loop (max %d turns) ===\n", MAX_TURNS);
 
     for (int iTurn = 0; iTurn < MAX_TURNS; iTurn++)
@@ -282,38 +286,29 @@ int main(int argc, char* argv[])
             CvPlayerAI& kPlayer = GET_PLAYER((PlayerTypes)p);
             if (kPlayer.isAlive())
             {
-                // Make this player the "active" one so AI pathfinding works
                 GC.getGameINLINE().setActivePlayer((PlayerTypes)p);
-
-                // Player-level turn processing (research, upkeep, etc.)
                 kPlayer.doTurn();
-
-                // Unit-level turn processing (refresh moves, selection group turns)
                 kPlayer.doTurnUnits();
-
-                // AI unit decisions (move settlers, build cities, explore, etc.)
                 kPlayer.AI_unitUpdate();
             }
         }
-        // Restore active player
         GC.getGameINLINE().setActivePlayer((PlayerTypes)0);
 
         // Advance the game turn (team turns, map turn, barbarians, etc.)
         GC.getGameINLINE().doTurn();
 
-        // Progress report every 5 turns
-        if (iTurn % 5 == 0)
+        // Progress report every 10 turns
+        if (iTurn % 10 == 0)
         {
-            int gameTurn = GC.getGameINLINE().getGameTurn();
-            fprintf(stderr, "[main] Turn %d (game turn %d):", iTurn, gameTurn);
+            fprintf(stderr, "  Turn %3d:", iTurn);
             for (int p = 0; p < MAX_CIV_PLAYERS; p++)
             {
                 CvPlayer& kPlayer = GET_PLAYER((PlayerTypes)p);
                 if (kPlayer.isAlive())
                 {
-                    fprintf(stderr, "  P%d[c=%d u=%d s=%d]", p,
+                    fprintf(stderr, "  P%d[c=%d u=%d pop=%d]", p,
                             kPlayer.getNumCities(), kPlayer.getNumUnits(),
-                            GC.getGameINLINE().getPlayerScore((PlayerTypes)p));
+                            kPlayer.getTotalPopulation());
                 }
             }
             fprintf(stderr, "\n");
@@ -331,15 +326,25 @@ int main(int argc, char* argv[])
     fprintf(stderr, "\n=== Headless game loop finished ===\n");
     fprintf(stderr, "Final game turn: %d\n", GC.getGameINLINE().getGameTurn());
 
-    // Print final score
+    // Print final stats
     for (int i = 0; i < MAX_PLAYERS; i++)
     {
         CvPlayer& kPlayer = GET_PLAYER((PlayerTypes)i);
         if (kPlayer.isAlive())
         {
-            fprintf(stderr, "  Player %d (%ls): Score %d\n",
-                    i, GC.getCivilizationInfo(kPlayer.getCivilizationType()).getDescription(),
-                    GC.getGameINLINE().getPlayerScore((PlayerTypes)i));
+            // Count known techs
+            int numTechs = 0;
+            CvTeam& kTeam = GET_TEAM(kPlayer.getTeam());
+            for (int t = 0; t < GC.getNumTechInfos(); t++)
+            {
+                if (kTeam.isHasTech((TechTypes)t))
+                    numTechs++;
+            }
+            const char* civType = GC.getCivilizationInfo(kPlayer.getCivilizationType()).getType();
+            fprintf(stderr, "  Player %d (%s): cities=%d units=%d pop=%d techs=%d\n",
+                    i, civType ? civType : "???",
+                    kPlayer.getNumCities(), kPlayer.getNumUnits(),
+                    kPlayer.getTotalPopulation(), numTechs);
         }
     }
 

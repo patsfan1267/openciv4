@@ -1,0 +1,26 @@
+# Build artifacts
+build/
+*.exe
+*.obj
+*.lib
+*.pdb
+*.ilk
+*.exp
+*.dll
+
+# Trace/debug logs
+trace*.log
+
+# IDE files
+.vs/
+*.suo
+*.user
+*.sln.docstates
+.idea/
+*.swp
+*~
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store

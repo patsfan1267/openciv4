@@ -644,7 +644,13 @@ protected:
 	int		m_iNumCultureVictoryCities;
 	int		m_eCultureVictoryCultureLevel;
 
+#ifdef OPENCIV4
+public: // OpenCiv4: expose doTurn for headless engine
+#endif
 	void doTurn();
+#ifdef OPENCIV4
+protected:
+#endif
 	void doDeals();
 	void doGlobalWarming();
 	void doHolyCity();

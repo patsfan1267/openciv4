@@ -1,15 +1,18 @@
-# Engine library - our new code (stubs, host logic, XML parser)
+# Engine library - our new code (stubs, host logic, XML parser, pathfinding)
 add_library(engine STATIC
     stubs/StubUtilityIFace.cpp
     stubs/StubLinkFixes.cpp
     xml/XmlParser.cpp
     xml/pugixml.cpp
+    pathfinding/FAStar.cpp
+    pathfinding/RealFAStarIFace.cpp
 )
 
 target_include_directories(engine PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/stubs
     ${CMAKE_CURRENT_SOURCE_DIR}/xml
+    ${CMAKE_CURRENT_SOURCE_DIR}/pathfinding
 )
 
 # Engine needs to see gamecore headers (for CvGlobals, interface base classes, etc.)

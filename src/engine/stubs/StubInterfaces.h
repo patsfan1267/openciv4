@@ -385,25 +385,25 @@ public:
 };
 
 // =============================================================================
-//  StubFAStarIFace
+//  RealFAStarIFace — actual A* implementation (not a stub)
 // =============================================================================
 class StubFAStarIFace : public CvDLLFAStarIFaceBase
 {
 public:
-    FAStar* create() override { return nullptr; } // STUB
-    void destroy(FAStar*& ptr, bool bSafeDelete) override { ptr = nullptr; } // STUB
-    bool GeneratePath(FAStar*, int iXstart, int iYstart, int iXdest, int iYdest, bool bCardinalOnly, int iInfo, bool bReuse) override { return false; } // STUB
-    void Initialize(FAStar*, int iColumns, int iRows, bool bWrapX, bool bWrapY, FAPointFunc DestValidFunc, FAHeuristic HeuristicFunc, FAStarFunc CostFunc, FAStarFunc ValidFunc, FAStarFunc NotifyChildFunc, FAStarFunc NotifyListFunc, void* pData) override {} // STUB
-    void SetData(FAStar*, const void* pData) override {} // STUB
-    FAStarNode* GetLastNode(FAStar*) override { return nullptr; } // STUB
-    bool IsPathStart(FAStar*, int iX, int iY) override { return false; } // STUB
-    bool IsPathDest(FAStar*, int iX, int iY) override { return false; } // STUB
-    int GetStartX(FAStar*) override { return 0; } // STUB
-    int GetStartY(FAStar*) override { return 0; } // STUB
-    int GetDestX(FAStar*) override { return 0; } // STUB
-    int GetDestY(FAStar*) override { return 0; } // STUB
-    int GetInfo(FAStar*) override { return 0; } // STUB
-    void ForceReset(FAStar*) override {} // STUB
+    FAStar* create() override;
+    void destroy(FAStar*& ptr, bool bSafeDelete) override;
+    bool GeneratePath(FAStar* pFAStar, int iXstart, int iYstart, int iXdest, int iYdest, bool bCardinalOnly, int iInfo, bool bReuse) override;
+    void Initialize(FAStar* pFAStar, int iColumns, int iRows, bool bWrapX, bool bWrapY, FAPointFunc DestValidFunc, FAHeuristic HeuristicFunc, FAStarFunc CostFunc, FAStarFunc ValidFunc, FAStarFunc NotifyChildFunc, FAStarFunc NotifyListFunc, void* pData) override;
+    void SetData(FAStar* pFAStar, const void* pData) override;
+    FAStarNode* GetLastNode(FAStar* pFAStar) override;
+    bool IsPathStart(FAStar* pFAStar, int iX, int iY) override;
+    bool IsPathDest(FAStar* pFAStar, int iX, int iY) override;
+    int GetStartX(FAStar*) override { return 0; }
+    int GetStartY(FAStar*) override { return 0; }
+    int GetDestX(FAStar* pFAStar) override;
+    int GetDestY(FAStar* pFAStar) override;
+    int GetInfo(FAStar* pFAStar) override;
+    void ForceReset(FAStar* pFAStar) override;
 };
 
 // =============================================================================
@@ -793,8 +793,8 @@ public:
     void stripSpecialCharacters(CvWString& szName) override {} // STUB
 
     // ---- Global init/uninit ----
-    void initGlobals() override { fprintf(stderr, "[StubUtility] initGlobals()\n"); } // STUB
-    void uninitGlobals() override { fprintf(stderr, "[StubUtility] uninitGlobals()\n"); } // STUB
+    void initGlobals() override;
+    void uninitGlobals() override;
 
     void callUpdater() override {} // STUB
 

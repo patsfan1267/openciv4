@@ -48,11 +48,15 @@ static TerrainIconMap terrainBlends[] = {
     { -2, "art/terrain/textures/hillblend.dds" },
 };
 
-// Feature blend textures (only forest and jungle have blend textures)
+// Feature textures — REAL art assets, NOT button icons!
 // 0=ICE, 1=JUNGLE, 2=OASIS, 3=FLOOD_PLAINS, 4=FOREST, 5=FALLOUT
 static FeatureIconMap featureBlends[] = {
-    { 1, "art/terrain/textures/jungleblend.dds" },
-    { 4, "art/terrain/textures/forestblend.dds" },
+    { 0, "art/terrain/features/icepack/icepack_1024.dds" },     // Ice: 512x512 ice texture
+    { 1, "art/shared/trees_1024.dds" },                          // Jungle: tree atlas (1024x1024)
+    { 2, "art/terrain/features/oasis/oasis_water.dds" },         // Oasis: 128x128 water texture
+    { 3, "art/terrain/features/floodplain/floodplain_baseall.dds" }, // Flood Plains: 512x1024
+    { 4, "art/shared/trees_1024.dds" },                          // Forest: tree atlas (1024x1024)
+    { 5, "art/terrain/features/fallout/fallout2.dds" },          // Fallout: 128x128 radiation texture
 };
 
 AssetManager::~AssetManager() {
@@ -183,11 +187,8 @@ bool AssetManager::initGL(const char* btsInstallDir) {
         GLuint tex = loadGLTextureFromFPK(entry.fpkPath);
         if (tex) {
             m_featureBlendGL[entry.featureType] = tex;
-            fprintf(stderr, "[AssetManager] Loaded blend feature %d: %s\n", entry.featureType, entry.fpkPath);
         }
     }
-    fprintf(stderr, "[AssetManager] Loaded %d blend terrain textures, %d blend feature textures\n",
-            (int)m_terrainBlendGL.size(), (int)m_featureBlendGL.size());
 
     generateWaterTextures();
     loadExtraTextures();

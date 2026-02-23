@@ -944,10 +944,12 @@ int main(int argc, char* argv[])
     bool headless = false;
     bool legacyRenderer = false;
     bool no3D = false;
+    bool autoScreenshot = false;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--headless") == 0) headless = true;
         if (strcmp(argv[i], "--legacy-2d") == 0) legacyRenderer = true;
         if (strcmp(argv[i], "--no-3d") == 0) no3D = true;
+        if (strcmp(argv[i], "--screenshot") == 0) autoScreenshot = true;
         if (strcmp(argv[i], "--test-fpk") == 0) {
             std::string fpkPath = std::string(BTS_INSTALL_DIR) + "/../Assets/Art0.FPK";
             FPKArchive fpk;
@@ -1402,7 +1404,13 @@ int main(int argc, char* argv[])
                             std::thread gameThread(gameThreadFunc);
 
                             bool running = true;
+                            bool screenshotRequested = false;
+                            Uint32 startTicks = SDL_GetTicks();
                             while (running) {
+                                // Auto-screenshot after 8 seconds if --screenshot flag was set
+                                if (autoScreenshot && !screenshotRequested && (SDL_GetTicks() - startTicks) > 8000) {
+                                    screenshotRequested = true;
+                                }
                                 SDL_Event event;
                                 while (SDL_PollEvent(&event)) {
                                     switch (event.type) {
@@ -1425,6 +1433,8 @@ int main(int argc, char* argv[])
                                             if (g_mapSnapshot.selectedUnitID >= 0)
                                                 pushCommand({GameCommand::SKIP_TURN});
                                         }
+                                        else if (event.key.keysym.sym == SDLK_F12)
+                                            screenshotRequested = true;
                                         else
                                             renderer.handleKeyDown(event.key.keysym.sym, g_mapSnapshot);
                                         break;
@@ -1453,6 +1463,33 @@ int main(int argc, char* argv[])
 
                                 renderer.draw(g_mapSnapshot);
                                 SDL_GL_SwapWindow(window);
+
+                                // F12 screenshot: read GL framebuffer → BMP
+                                if (screenshotRequested) {
+                                    screenshotRequested = false;
+                                    int sw, sh;
+                                    SDL_GetWindowSize(window, &sw, &sh);
+                                    SDL_Surface* surf = SDL_CreateRGBSurface(0, sw, sh, 24,
+                                        0x000000FF, 0x0000FF00, 0x00FF0000, 0);
+                                    if (surf) {
+                                        glReadPixels(0, 0, sw, sh, GL_RGB, GL_UNSIGNED_BYTE, surf->pixels);
+                                        // Flip vertically (GL origin is bottom-left)
+                                        int pitch = surf->pitch;
+                                        std::vector<uint8_t> row(pitch);
+                                        for (int y = 0; y < sh / 2; y++) {
+                                            uint8_t* top = (uint8_t*)surf->pixels + y * pitch;
+                                            uint8_t* bot = (uint8_t*)surf->pixels + (sh - 1 - y) * pitch;
+                                            memcpy(row.data(), top, pitch);
+                                            memcpy(top, bot, pitch);
+                                            memcpy(bot, row.data(), pitch);
+                                        }
+                                        SDL_SaveBMP(surf, "screenshot.bmp");
+                                        SDL_FreeSurface(surf);
+                                        printf("Screenshot saved to screenshot.bmp\n");
+                                        fflush(stdout);
+                                        if (autoScreenshot) running = false;
+                                    }
+                                }
                             }
 
                             g_gameRunning = false;

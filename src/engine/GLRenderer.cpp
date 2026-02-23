@@ -1121,7 +1121,9 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
     }
 
     // --- Pass 1b: Feature texture overlays ---
-    // All 6 feature types: 0=Ice, 1=Jungle, 2=Oasis, 3=FloodPlains, 4=Forest, 5=Fallout
+    // Uses REAL art assets from FPK — NEVER button icons.
+    // 0=Ice (icepack_1024.dds), 1=Jungle (JungleBlend.dds), 2=Oasis (oasis_water.dds),
+    // 3=FloodPlains (floodplain_baseall.dds), 4=Forest (ForestBlend.dds), 5=Fallout (fallout2.dds)
     if (m_assets) {
         curBoundTex = 0;
         beginBatch();
@@ -1144,24 +1146,9 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                 if (screenTX + screenTileSize < 0 || screenTX > m_windowW ||
                     screenTY + screenTileSize < 0 || screenTY > m_windowH) continue;
 
-                // Try blend texture first (Forest/Jungle), then button icon (Ice/Oasis/FloodPlains/Fallout)
+                // All feature textures come from getFeatureBlendGL (loaded from real FPK art)
                 GLuint ftex = m_assets->getFeatureBlendGL(plot.featureType);
-                float alpha = 0.75f;
-                bool useTiling = true; // blend textures tile, icons don't
-
-                if (!ftex) {
-                    ftex = m_assets->getFeatureTextureGL(plot.featureType);
-                    useTiling = false;
-                    // Per-feature alpha and rendering style
-                    switch (plot.featureType) {
-                        case 0: alpha = 0.65f; break; // Ice: semi-transparent white/blue
-                        case 2: alpha = 0.80f; break; // Oasis: visible palm/water
-                        case 3: alpha = 0.55f; break; // Flood Plains: subtle green overlay
-                        case 5: alpha = 0.50f; break; // Fallout: semi-transparent gray
-                        default: alpha = 0.60f; break;
-                    }
-                }
-                if (!ftex) continue;
+                if (!ftex) continue; // skip if no real texture available
 
                 if (ftex != curBoundTex) {
                     flushBatch();
@@ -1169,27 +1156,54 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                     curBoundTex = ftex;
                 }
 
+                // Per-feature rendering parameters
+                float alpha, tintR = 1.0f, tintG = 1.0f, tintB = 1.0f;
                 float u0, v0, u1, v1;
-                if (useTiling) {
-                    // Blend textures: world-space UV tiling
-                    float tilesPerTex = 2.0f;
-                    u0 = (float)x / tilesPerTex;
-                    v0 = (float)y / tilesPerTex;
-                    u1 = u0 + 1.0f / tilesPerTex;
-                    v1 = v0 + 1.0f / tilesPerTex;
-                } else {
-                    // Button icons: stretch to fill tile
-                    u0 = 0; v0 = 0; u1 = 1; v1 = 1;
-                }
 
-                // Tint color per feature type for visual variety
-                float tintR = 1.0f, tintG = 1.0f, tintB = 1.0f;
-                if (!useTiling) {
-                    switch (plot.featureType) {
-                        case 0: tintR = 0.85f; tintG = 0.90f; tintB = 1.0f; break; // Ice: blue-white tint
-                        case 3: tintR = 0.80f; tintG = 0.90f; tintB = 0.70f; break; // Flood plains: green-ish
-                        case 5: tintR = 0.70f; tintG = 0.65f; tintB = 0.50f; break; // Fallout: brown-gray
-                    }
+                switch (plot.featureType) {
+                    case 0: // Ice: 512x512 seamless texture, tile it
+                        alpha = 0.70f;
+                        tintR = 0.85f; tintG = 0.90f; tintB = 1.0f;
+                        u0 = (float)x * 0.5f; v0 = (float)y * 0.5f;
+                        u1 = u0 + 0.5f; v1 = v0 + 0.5f;
+                        break;
+                    case 4: // Forest: trees_1024.dds tree canopy atlas
+                        alpha = 0.85f;
+                        tintR = 0.55f; tintG = 0.75f; tintB = 0.40f; // green forest tint
+                        // Use a sub-region of the tree atlas, varied per-tile
+                        { int cell = ((x * 7 + y * 13) & 3); // 0-3 variety
+                          float cx = (cell % 2) * 0.5f;
+                          float cy = (cell / 2) * 0.5f;
+                          u0 = cx; v0 = cy; u1 = cx + 0.5f; v1 = cy + 0.5f; }
+                        break;
+                    case 1: // Jungle: trees_1024.dds with darker tropical tint
+                        alpha = 0.90f;
+                        tintR = 0.35f; tintG = 0.60f; tintB = 0.25f; // darker jungle tint
+                        { int cell = ((x * 11 + y * 7) & 3);
+                          float cx = (cell % 2) * 0.5f;
+                          float cy = (cell / 2) * 0.5f;
+                          u0 = cx; v0 = cy; u1 = cx + 0.5f; v1 = cy + 0.5f; }
+                        break;
+                    case 2: // Oasis: small 128x128 water texture, stretch to tile
+                        alpha = 0.80f;
+                        u0 = 0; v0 = 0; u1 = 1; v1 = 1;
+                        break;
+                    case 3: // Flood Plains: 512x1024 texture, tile it
+                        alpha = 0.55f;
+                        tintR = 0.85f; tintG = 0.95f; tintB = 0.75f;
+                        u0 = (float)x * 0.5f; v0 = (float)y * 0.25f;
+                        u1 = u0 + 0.5f; v1 = v0 + 0.25f;
+                        break;
+                    case 5: // Fallout: small 128x128 texture, tile it densely
+                        alpha = 0.50f;
+                        tintR = 0.75f; tintG = 0.70f; tintB = 0.55f;
+                        u0 = (float)x; v0 = (float)y;
+                        u1 = u0 + 1.0f; v1 = v0 + 1.0f;
+                        break;
+                    default:
+                        alpha = 0.60f;
+                        u0 = 0; v0 = 0; u1 = 1; v1 = 1;
+                        break;
                 }
 
                 pushQuad(screenTX, screenTY, screenTileSize, screenTileSize,

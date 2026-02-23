@@ -7,10 +7,22 @@ add_library(engine STATIC
     pathfinding/FAStar.cpp
     pathfinding/RealFAStarIFace.cpp
     Renderer.cpp
+    GLRenderer.cpp
+    ShaderProgram.cpp
     FPKArchive.cpp
     DDSLoader.cpp
     AssetManager.cpp
+    NifLoader.cpp
 )
+
+# glad (OpenGL loader) - compiled as C
+add_library(glad STATIC
+    "${CMAKE_SOURCE_DIR}/third_party/glad/glad.c"
+)
+target_include_directories(glad PUBLIC "${CMAKE_SOURCE_DIR}/third_party/glad")
+if(MSVC)
+    target_compile_options(glad PRIVATE /W0)
+endif()
 
 target_include_directories(engine PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -20,10 +32,13 @@ target_include_directories(engine PUBLIC
 )
 
 # Engine needs to see gamecore headers (for CvGlobals, interface base classes, etc.)
-target_link_libraries(engine PUBLIC gamecore)
+target_link_libraries(engine PUBLIC gamecore glad)
 
-# SDL2 + SDL2_ttf headers for Renderer.cpp
+# SDL2 + SDL2_ttf headers for Renderer/GLRenderer
 target_include_directories(engine PRIVATE "${SDL2_INCLUDE_DIR}" "${SDL2_TTF_INCLUDE_DIR}")
+
+# glad headers
+target_include_directories(engine PRIVATE "${CMAKE_SOURCE_DIR}/third_party/glad")
 
 # Python 2.4 headers needed transitively by CvDLLPythonIFaceBase.h
 set(PYTHON24_ROOT "C:/Civ4SDK/beyond-the-sword-sdk-develop/CvGameCoreDLL/Python24")

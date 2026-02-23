@@ -77,10 +77,15 @@ static LONG WINAPI vehHandler(EXCEPTION_POINTERS* pExInfo) {
 // Phase 1: Map viewer
 #include "MapSnapshot.h"
 #include "Renderer.h"
+#include "GLRenderer.h"
+
+// OpenGL loader
+#include <glad.h>
 
 // Phase 1b: Asset loading
 #include "FPKArchive.h"
 #include "DDSLoader.h"
+#include "NifLoader.h"
 
 // ---- Global state ----
 static MapSnapshot g_mapSnapshot;
@@ -828,8 +833,10 @@ int main(int argc, char* argv[])
 
     // ---- Check flags ----
     bool headless = false;
+    bool legacyRenderer = false;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--headless") == 0) headless = true;
+        if (strcmp(argv[i], "--legacy-2d") == 0) legacyRenderer = true;
         if (strcmp(argv[i], "--test-fpk") == 0) {
             std::string fpkPath = std::string(BTS_INSTALL_DIR) + "/../Assets/Art0.FPK";
             FPKArchive fpk;
@@ -842,6 +849,144 @@ int main(int argc, char* argv[])
             FPKArchive fpk;
             if (!fpk.open(fpkPath.c_str())) { fprintf(stderr, "FAILED\n"); return 1; }
             fprintf(stderr, "DDS test OK\n");
+            return 0;
+        }
+        if (strcmp(argv[i], "--test-nif") == 0) {
+            // Test NIF loader against loose NIF files from the game
+            const char* testFiles[] = {
+                "/../Assets/Art/Interface/Screens/Throne/throneRoom-geometryOnly.nif",
+                "/../Assets/Art/Interface/Screens/Civilopedia/WaterEnvironment/WaterEnvironment.nif",
+                "/../Assets/Art/Interface/Screens/SpaceShip/LaunchPad.nif",
+                "/../Assets/Art/LeaderHeads/Abraham Lincoln/Abraham Lincoln.nif",
+            };
+            int tested = 0, passed = 0;
+            for (const char* relPath : testFiles) {
+                std::string fullPath = std::string(BTS_INSTALL_DIR) + relPath;
+                fprintf(stderr, "\n--- Testing: %s ---\n", relPath);
+                auto nifFile = nif::loadNifFromFile(fullPath.c_str());
+                if (!nifFile) {
+                    fprintf(stderr, "  FAILED to load\n");
+                    continue;
+                }
+                tested++;
+
+                // Count blocks by type
+                int nodes = 0, shapes = 0, meshes = 0, textures = 0;
+                int totalVerts = 0, totalTris = 0;
+                for (uint32_t b = 0; b < nifFile->header.numBlocks; b++) {
+                    auto* block = nifFile->getBlock(b);
+                    if (!block) continue;
+                    switch (block->type) {
+                        case nif::BlockType::NiNode: nodes++; break;
+                        case nif::BlockType::NiTriShape:
+                        case nif::BlockType::NiTriStrips: shapes++; break;
+                        case nif::BlockType::NiTriShapeData: {
+                            auto* d = static_cast<nif::NiTriShapeDataBlock*>(block);
+                            meshes++; totalVerts += d->numVertices; totalTris += d->numTriangles;
+                            break;
+                        }
+                        case nif::BlockType::NiTriStripsData: {
+                            auto* d = static_cast<nif::NiTriStripsDataBlock*>(block);
+                            meshes++; totalVerts += d->numVertices; totalTris += d->numTriangles;
+                            break;
+                        }
+                        case nif::BlockType::NiSourceTexture: textures++; break;
+                        default: break;
+                    }
+                }
+                fprintf(stderr, "  Blocks: %u total, %d nodes, %d shapes, %d meshes, %d textures\n",
+                        nifFile->header.numBlocks, nodes, shapes, meshes, textures);
+                fprintf(stderr, "  Geometry: %d vertices, %d triangles\n", totalVerts, totalTris);
+                fprintf(stderr, "  Roots: %zu\n", nifFile->rootRefs.size());
+
+                // Walk scene graph from root
+                if (!nifFile->rootRefs.empty()) {
+                    auto* root = nifFile->getBlock<nif::NiNodeBlock>(nifFile->rootRefs[0]);
+                    if (root) {
+                        fprintf(stderr, "  Root node: '%s', %zu children\n",
+                                root->name.c_str(), root->childRefs.size());
+                    }
+                }
+
+                // List texture paths
+                for (uint32_t b = 0; b < nifFile->header.numBlocks; b++) {
+                    auto* tex = nifFile->getBlock<nif::NiSourceTextureBlock>(b);
+                    if (tex && !tex->fileName.empty()) {
+                        fprintf(stderr, "  Texture: %s\n", tex->fileName.c_str());
+                    }
+                }
+                passed++;
+            }
+            fprintf(stderr, "\n=== NIF test: %d/%d files passed ===\n", passed, tested);
+
+            // Also test loading a NIF from inside Art0.FPK
+            std::string fpkPath = std::string(BTS_INSTALL_DIR) + "/../Assets/Art0.FPK";
+            FPKArchive fpk;
+            if (fpk.open(fpkPath.c_str())) {
+                // Find first .nif in the FPK
+                std::string firstNif;
+                for (const auto& entry : fpk.entries()) {
+                    size_t len = entry.filename.size();
+                    if (len > 4 && entry.filename.substr(len - 4) == ".nif") {
+                        firstNif = entry.filename;
+                        break;
+                    }
+                }
+                if (!firstNif.empty()) {
+                    fprintf(stderr, "\n--- FPK NIF test: %s ---\n", firstNif.c_str());
+                    auto data = fpk.readFile(firstNif);
+                    if (!data.empty()) {
+                        auto nifFile = nif::loadNifFromMemory(data);
+                        if (nifFile) {
+                            fprintf(stderr, "  FPK NIF loaded: %u blocks\n", nifFile->header.numBlocks);
+                        } else {
+                            fprintf(stderr, "  FPK NIF parse FAILED\n");
+                        }
+                    }
+                }
+            }
+
+            return 0;
+        }
+        if (strcmp(argv[i], "--scan-nif-types") == 0) {
+            // Scan all NIF files in Art0.FPK to find block type frequency
+            std::string fpkPath = std::string(BTS_INSTALL_DIR) + "/../Assets/Art0.FPK";
+            FPKArchive fpk;
+            if (!fpk.open(fpkPath.c_str())) { fprintf(stderr, "FAILED\n"); return 1; }
+
+            std::unordered_map<std::string, int> typeCounts;
+            int nifCount = 0, fullParse = 0;
+            for (const auto& entry : fpk.entries()) {
+                size_t len = entry.filename.size();
+                if (len < 4 || entry.filename.substr(len - 4) != ".nif") continue;
+
+                auto data = fpk.readFile(entry.filename);
+                if (data.empty()) continue;
+
+                auto nifFile = nif::loadNif(data.data(), data.size());
+                if (!nifFile) continue;
+                nifCount++;
+
+                bool allParsed = true;
+                for (uint32_t b = 0; b < nifFile->header.numBlocks; b++) {
+                    uint16_t typeIdx = nifFile->header.blockTypeIndices[b];
+                    const std::string& typeName = nifFile->header.blockTypeNames[typeIdx];
+                    typeCounts[typeName]++;
+                    if (!nifFile->getBlock(b)) allParsed = false;
+                }
+                if (allParsed) fullParse++;
+            }
+            fprintf(stderr, "\n=== Scanned %d NIF files from Art0.FPK ===\n", nifCount);
+            fprintf(stderr, "Fully parsed: %d / %d (%.1f%%)\n", fullParse, nifCount,
+                    nifCount > 0 ? 100.0 * fullParse / nifCount : 0);
+            fprintf(stderr, "\nBlock types (by frequency):\n");
+
+            // Sort by count
+            std::vector<std::pair<std::string, int>> sorted(typeCounts.begin(), typeCounts.end());
+            std::sort(sorted.begin(), sorted.end(), [](auto& a, auto& b) { return a.second > b.second; });
+            for (auto& [name, count] : sorted) {
+                fprintf(stderr, "  %-45s %6d\n", name.c_str(), count);
+            }
             return 0;
         }
     }
@@ -1064,141 +1209,214 @@ int main(int argc, char* argv[])
             headlessGameThreadFunc();
         } else {
             int winW = 1280, winH = 720;
-            SDL_Window* window = SDL_CreateWindow(
-                "OpenCiv4 — Phase 2: Playable Game",
-                SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                winW, winH,
-                SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
-            );
-            if (!window) {
-                fprintf(stderr, "[main] SDL_CreateWindow failed: %s\n", SDL_GetError());
-                SDL_Quit();
-                headlessGameThreadFunc();
+
+            // Build font path (shared between both renderers)
+            std::string fontPath;
+            char* basePath = SDL_GetBasePath();
+            if (basePath) {
+                std::string base(basePath);
+                SDL_free(basePath);
+                for (auto& c : base) if (c == '\\') c = '/';
+                if (!base.empty() && base.back() == '/') base.pop_back();
+                auto pos = base.rfind('/');
+                if (pos != std::string::npos) base = base.substr(0, pos);
+                fontPath = base + "/assets/fonts/DejaVuSans.ttf";
             } else {
-                SDL_Renderer* sdlRenderer = SDL_CreateRenderer(
-                    window, -1,
-                    SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC
+                fontPath = "assets/fonts/DejaVuSans.ttf";
+            }
+
+            if (!legacyRenderer) {
+                // ============= OpenGL 3.3 Renderer =============
+                fprintf(stderr, "[main] Creating OpenGL 3.3 window...\n");
+                SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+                SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+                SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+                SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+
+                SDL_Window* window = SDL_CreateWindow(
+                    "OpenCiv4 — 3D Renderer",
+                    SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                    winW, winH,
+                    SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_SHOWN
                 );
-                if (!sdlRenderer) {
-                    fprintf(stderr, "[main] SDL_CreateRenderer failed: %s\n", SDL_GetError());
-                    SDL_DestroyWindow(window);
+                if (!window) {
+                    fprintf(stderr, "[main] SDL_CreateWindow (OpenGL) failed: %s\n", SDL_GetError());
+                    fprintf(stderr, "[main] Falling back to legacy 2D renderer.\n");
+                    legacyRenderer = true;
+                } else {
+                    SDL_GLContext glContext = SDL_GL_CreateContext(window);
+                    if (!glContext) {
+                        fprintf(stderr, "[main] SDL_GL_CreateContext failed: %s\n", SDL_GetError());
+                        SDL_DestroyWindow(window);
+                        fprintf(stderr, "[main] Falling back to legacy 2D renderer.\n");
+                        legacyRenderer = true;
+                    } else {
+                        if (!gladLoadGLLoader((GLADloadproc)SDL_GL_GetProcAddress)) {
+                            fprintf(stderr, "[main] gladLoadGLLoader failed!\n");
+                            SDL_GL_DeleteContext(glContext);
+                            SDL_DestroyWindow(window);
+                            fprintf(stderr, "[main] Falling back to legacy 2D renderer.\n");
+                            legacyRenderer = true;
+                        } else {
+                            SDL_GL_SetSwapInterval(1); // vsync
+
+                            AssetManager assetMgr;
+                            assetMgr.initGL(BTS_INSTALL_DIR);
+
+                            GLRenderer renderer;
+                            renderer.init(winW, winH, &assetMgr);
+                            renderer.initFonts(fontPath.c_str());
+                            renderer.setCommandCallback(pushCommand);
+
+                            fprintf(stderr, "[main] Starting game thread...\n");
+                            std::thread gameThread(gameThreadFunc);
+
+                            bool running = true;
+                            while (running) {
+                                SDL_Event event;
+                                while (SDL_PollEvent(&event)) {
+                                    switch (event.type) {
+                                    case SDL_QUIT:
+                                        running = false;
+                                        break;
+                                    case SDL_KEYDOWN:
+                                        if (event.key.keysym.sym == SDLK_ESCAPE) {
+                                            if (g_mapSnapshot.cityScreenOpen)
+                                                pushCommand({GameCommand::CLOSE_CITY});
+                                            else
+                                                running = false;
+                                        }
+                                        else if (event.key.keysym.sym == SDLK_RETURN ||
+                                                 event.key.keysym.sym == SDLK_KP_ENTER)
+                                            pushCommand({GameCommand::END_TURN});
+                                        else if (event.key.keysym.sym == SDLK_TAB)
+                                            pushCommand({GameCommand::CYCLE_UNIT});
+                                        else if (event.key.keysym.sym == SDLK_SPACE) {
+                                            if (g_mapSnapshot.selectedUnitID >= 0)
+                                                pushCommand({GameCommand::SKIP_TURN});
+                                        }
+                                        else
+                                            renderer.handleKeyDown(event.key.keysym.sym, g_mapSnapshot);
+                                        break;
+                                    case SDL_KEYUP:
+                                        renderer.handleKeyUp(event.key.keysym.sym);
+                                        break;
+                                    case SDL_MOUSEWHEEL:
+                                        { int mx, my; SDL_GetMouseState(&mx, &my);
+                                          renderer.handleMouseWheel(event.wheel.y, mx, my); }
+                                        break;
+                                    case SDL_MOUSEBUTTONDOWN:
+                                        renderer.handleMouseClick(event.button.x, event.button.y,
+                                                                  event.button.button, g_mapSnapshot);
+                                        break;
+                                    case SDL_MOUSEMOTION:
+                                        renderer.handleMouseMotion(event.motion.xrel, event.motion.yrel,
+                                            (event.motion.state & (SDL_BUTTON_MMASK | SDL_BUTTON_RMASK)) != 0);
+                                        break;
+                                    case SDL_WINDOWEVENT:
+                                        if (event.window.event == SDL_WINDOWEVENT_RESIZED)
+                                            renderer.handleResize(event.window.data1, event.window.data2);
+                                        break;
+                                    }
+                                }
+
+                                renderer.draw(g_mapSnapshot);
+                                SDL_GL_SwapWindow(window);
+                            }
+
+                            g_gameRunning = false;
+                            if (gameThread.joinable()) gameThread.join();
+
+                            renderer.shutdown();
+                            SDL_GL_DeleteContext(glContext);
+                            SDL_DestroyWindow(window);
+                            TTF_Quit();
+                            SDL_Quit();
+                        }
+                    }
+                }
+            }
+
+            if (legacyRenderer) {
+                // ============= Legacy SDL2 2D Renderer =============
+                fprintf(stderr, "[main] Using legacy 2D renderer (--legacy-2d).\n");
+                SDL_Window* window = SDL_CreateWindow(
+                    "OpenCiv4 — Phase 2 (Legacy 2D)",
+                    SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                    winW, winH,
+                    SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
+                );
+                if (!window) {
+                    fprintf(stderr, "[main] SDL_CreateWindow failed: %s\n", SDL_GetError());
                     SDL_Quit();
                     headlessGameThreadFunc();
                 } else {
-                    fprintf(stderr, "[main] SDL2 window created (%dx%d).\n", winW, winH);
-
-                    AssetManager assetMgr;
-                    assetMgr.init(sdlRenderer, BTS_INSTALL_DIR);
-
-                    Renderer renderer(sdlRenderer, winW, winH, &assetMgr);
-
-                    // Build absolute font path from exe directory
-                    std::string fontPath;
-                    char* basePath = SDL_GetBasePath();
-                    if (basePath) {
-                        // SDL_GetBasePath returns exe dir with trailing separator
-                        // e.g. "C:\OpenCiv4\build\"  — go up one level to project root
-                        std::string base(basePath);
-                        SDL_free(basePath);
-                        // Normalize to forward slashes
-                        for (auto& c : base) if (c == '\\') c = '/';
-                        // Remove trailing slash, go up one directory
-                        if (!base.empty() && base.back() == '/') base.pop_back();
-                        auto pos = base.rfind('/');
-                        if (pos != std::string::npos) base = base.substr(0, pos);
-                        fontPath = base + "/assets/fonts/DejaVuSans.ttf";
+                    SDL_Renderer* sdlRenderer = SDL_CreateRenderer(
+                        window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+                    if (!sdlRenderer) {
+                        fprintf(stderr, "[main] SDL_CreateRenderer failed: %s\n", SDL_GetError());
+                        SDL_DestroyWindow(window);
+                        SDL_Quit();
+                        headlessGameThreadFunc();
                     } else {
-                        fontPath = "assets/fonts/DejaVuSans.ttf";
-                    }
-                    renderer.initFonts(fontPath.c_str());
-                    renderer.setCommandCallback(pushCommand);
+                        AssetManager assetMgr;
+                        assetMgr.init(sdlRenderer, BTS_INSTALL_DIR);
+                        Renderer renderer(sdlRenderer, winW, winH, &assetMgr);
+                        renderer.initFonts(fontPath.c_str());
+                        renderer.setCommandCallback(pushCommand);
 
-                    // Start game on background thread
-                    fprintf(stderr, "[main] Starting game thread...\n");
-                    std::thread gameThread(gameThreadFunc);
+                        fprintf(stderr, "[main] Starting game thread...\n");
+                        std::thread gameThread(gameThreadFunc);
 
-                    // ---- Main render + input loop ----
-                    bool running = true;
-                    while (running) {
-                        SDL_Event event;
-                        while (SDL_PollEvent(&event)) {
-                            switch (event.type) {
-                            case SDL_QUIT:
-                                running = false;
-                                break;
-
-                            case SDL_KEYDOWN:
-                                if (event.key.keysym.sym == SDLK_ESCAPE) {
-                                    // If city screen open, close it; else quit
-                                    if (g_mapSnapshot.cityScreenOpen) {
-                                        pushCommand({GameCommand::CLOSE_CITY});
-                                    } else {
-                                        running = false;
+                        bool running = true;
+                        while (running) {
+                            SDL_Event event;
+                            while (SDL_PollEvent(&event)) {
+                                switch (event.type) {
+                                case SDL_QUIT: running = false; break;
+                                case SDL_KEYDOWN:
+                                    if (event.key.keysym.sym == SDLK_ESCAPE) {
+                                        if (g_mapSnapshot.cityScreenOpen)
+                                            pushCommand({GameCommand::CLOSE_CITY});
+                                        else running = false;
                                     }
-                                }
-                                else if (event.key.keysym.sym == SDLK_RETURN ||
-                                         event.key.keysym.sym == SDLK_KP_ENTER) {
-                                    pushCommand({GameCommand::END_TURN});
-                                }
-                                else if (event.key.keysym.sym == SDLK_TAB) {
-                                    pushCommand({GameCommand::CYCLE_UNIT});
-                                }
-                                else if (event.key.keysym.sym == SDLK_SPACE) {
-                                    // Space: skip unit (move to next)
-                                    if (g_mapSnapshot.selectedUnitID >= 0) {
-                                        pushCommand({GameCommand::SKIP_TURN});
+                                    else if (event.key.keysym.sym == SDLK_RETURN ||
+                                             event.key.keysym.sym == SDLK_KP_ENTER)
+                                        pushCommand({GameCommand::END_TURN});
+                                    else if (event.key.keysym.sym == SDLK_TAB)
+                                        pushCommand({GameCommand::CYCLE_UNIT});
+                                    else if (event.key.keysym.sym == SDLK_SPACE) {
+                                        if (g_mapSnapshot.selectedUnitID >= 0)
+                                            pushCommand({GameCommand::SKIP_TURN});
                                     }
+                                    else renderer.handleKeyDown(event.key.keysym.sym, g_mapSnapshot);
+                                    break;
+                                case SDL_KEYUP: renderer.handleKeyUp(event.key.keysym.sym); break;
+                                case SDL_MOUSEWHEEL:
+                                    { int mx, my; SDL_GetMouseState(&mx, &my);
+                                      renderer.handleMouseWheel(event.wheel.y, mx, my); } break;
+                                case SDL_MOUSEBUTTONDOWN:
+                                    renderer.handleMouseClick(event.button.x, event.button.y,
+                                                              event.button.button, g_mapSnapshot); break;
+                                case SDL_MOUSEMOTION:
+                                    renderer.handleMouseMotion(event.motion.xrel, event.motion.yrel,
+                                        (event.motion.state & (SDL_BUTTON_MMASK | SDL_BUTTON_RMASK)) != 0); break;
+                                case SDL_WINDOWEVENT:
+                                    if (event.window.event == SDL_WINDOWEVENT_RESIZED)
+                                        renderer.handleResize(event.window.data1, event.window.data2);
+                                    break;
                                 }
-                                else {
-                                    // Route to renderer for camera/UI keys
-                                    renderer.handleKeyDown(event.key.keysym.sym, g_mapSnapshot);
-                                }
-                                break;
-
-                            case SDL_KEYUP:
-                                renderer.handleKeyUp(event.key.keysym.sym);
-                                break;
-
-                            case SDL_MOUSEWHEEL:
-                                {
-                                    int mx, my;
-                                    SDL_GetMouseState(&mx, &my);
-                                    renderer.handleMouseWheel(event.wheel.y, mx, my);
-                                }
-                                break;
-
-                            case SDL_MOUSEBUTTONDOWN:
-                                renderer.handleMouseClick(
-                                    event.button.x, event.button.y,
-                                    event.button.button, g_mapSnapshot
-                                );
-                                break;
-
-                            case SDL_MOUSEMOTION:
-                                renderer.handleMouseMotion(
-                                    event.motion.xrel, event.motion.yrel,
-                                    (event.motion.state & (SDL_BUTTON_MMASK | SDL_BUTTON_RMASK)) != 0
-                                );
-                                break;
-
-                            case SDL_WINDOWEVENT:
-                                if (event.window.event == SDL_WINDOWEVENT_RESIZED)
-                                    renderer.handleResize(event.window.data1, event.window.data2);
-                                break;
                             }
+                            renderer.draw(g_mapSnapshot);
                         }
 
-                        renderer.draw(g_mapSnapshot);
+                        g_gameRunning = false;
+                        if (gameThread.joinable()) gameThread.join();
+                        SDL_DestroyRenderer(sdlRenderer);
+                        SDL_DestroyWindow(window);
+                        TTF_Quit();
+                        SDL_Quit();
                     }
-
-                    g_gameRunning = false;
-                    if (gameThread.joinable())
-                        gameThread.join();
-
-                    SDL_DestroyRenderer(sdlRenderer);
-                    SDL_DestroyWindow(window);
-                    TTF_Quit();
-                    SDL_Quit();
                 }
             }
         }

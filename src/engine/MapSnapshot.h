@@ -16,8 +16,11 @@ struct PlotData {
     int featureType;    // FeatureTypes enum value (-1 = none)
     int ownerID;        // PlayerTypes (-1 = no owner)
     bool isRiver;
+    bool isNOfRiver;    // river along north edge of this plot
+    bool isWOfRiver;    // river along west edge of this plot
     bool isCity;
     int unitCount;
+    int cityPopulation; // 0 if not a city
     uint8_t ownerColorR, ownerColorG, ownerColorB; // owner's primary color
     std::string cityName;  // empty if not a city
 };

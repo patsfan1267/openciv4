@@ -32,6 +32,7 @@ public:
     void handleKeyUp(SDL_Keycode key);
     void handleMouseWheel(int y, int mouseX, int mouseY);
     void handleMouseMotion(int dx, int dy, bool anyDragButton);
+    void handleMouseClick(int mouseX, int mouseY, int button, MapSnapshot& snapshot);
     void handleResize(int newW, int newH);
 
 private:
@@ -64,10 +65,15 @@ private:
     bool m_cameraInitialized = false;
     void autoFitCamera(const MapSnapshot& snapshot);
 
+    // Minimap bounds (updated each frame for click-to-jump)
+    int m_mmX = 0, m_mmY = 0, m_mmW = 0, m_mmH = 0;
+
     // Hex drawing helpers
     void hexCenter(int col, int row, int mapHeight, float& cx, float& cy) const;
     void drawFilledHex(float cx, float cy, float radius, uint8_t r, uint8_t g, uint8_t b);
     void drawHexOutline(float cx, float cy, float radius, uint8_t r, uint8_t g, uint8_t b);
+    void drawHexEdge(float cx, float cy, float radius, int edgeIndex,
+                     uint8_t r, uint8_t g, uint8_t b, int thickness);
 
     // Feature overlays (forests, jungle, etc.)
     void drawFeatureOverlay(float cx, float cy, float radius, int featureType);

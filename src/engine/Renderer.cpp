@@ -96,6 +96,39 @@ void Renderer::drawHexOutline(float cx, float cy, float radius, uint8_t r, uint8
     }
 }
 
+void Renderer::drawHexEdge(float cx, float cy, float radius, int edgeIndex,
+                           uint8_t r, uint8_t g, uint8_t b, int thickness)
+{
+    // edgeIndex: 0=right, 1=bottom-right, 2=bottom-left, 3=left, 4=top-left, 5=top-right
+    // For flat-top hex: vertex i connects to vertex (i+1)%6
+    int i = edgeIndex;
+    int j = (i + 1) % 6;
+
+    float x1 = cx + radius * HEX_COS[i];
+    float y1 = cy + radius * HEX_SIN[i];
+    float x2 = cx + radius * HEX_COS[j];
+    float y2 = cy + radius * HEX_SIN[j];
+
+    SDL_SetRenderDrawColor(m_renderer, r, g, b, 255);
+    SDL_RenderDrawLine(m_renderer, (int)x1, (int)y1, (int)x2, (int)y2);
+
+    // Draw thicker by offsetting
+    for (int t = 1; t < thickness; t++) {
+        // Offset perpendicular to the edge (inward)
+        float mx = (x1 + x2) * 0.5f;
+        float my = (y1 + y2) * 0.5f;
+        float dx = cx - mx;
+        float dy = cy - my;
+        float len = sqrtf(dx * dx + dy * dy);
+        if (len < 0.01f) continue;
+        float nx = dx / len * t;
+        float ny = dy / len * t;
+        SDL_RenderDrawLine(m_renderer,
+            (int)(x1 + nx), (int)(y1 + ny),
+            (int)(x2 + nx), (int)(y2 + ny));
+    }
+}
+
 // ---------- Feature overlays ----------
 
 void Renderer::drawFeatureOverlay(float cx, float cy, float radius, int featureType)
@@ -293,9 +326,22 @@ void Renderer::draw(MapSnapshot& snapshot)
                     drawFeatureOverlay(screenCX, screenCY, screenRadius, plot.featureType);
                 }
 
-                // River indicator (blue hex outline, slightly inset)
-                if (plot.isRiver && screenRadius >= 3) {
-                    drawHexOutline(screenCX, screenCY, screenRadius * 0.85f, 50, 100, 200);
+                // River edges — draw thick blue lines on specific hex edges
+                // For flat-top hex vertices: 0=right, 1=bottom-right, 2=bottom-left,
+                //                            3=left, 4=top-left, 5=top-right
+                // Edge N connects vertex N to vertex (N+1)%6
+                // isNOfRiver: river along the top edge = edge 4 (top-left to top-right)
+                // isWOfRiver: river along the left edge = edge 3 (left to top-left)
+                if (screenRadius >= 3) {
+                    int riverThickness = std::max(2, (int)(screenRadius * 0.15f));
+                    if (plot.isNOfRiver) {
+                        drawHexEdge(screenCX, screenCY, screenRadius, 4,
+                                    40, 120, 220, riverThickness);
+                    }
+                    if (plot.isWOfRiver) {
+                        drawHexEdge(screenCX, screenCY, screenRadius, 3,
+                                    40, 120, 220, riverThickness);
+                    }
                 }
 
                 // Territory border
@@ -358,18 +404,22 @@ void Renderer::draw(MapSnapshot& snapshot)
                         screenCY < -50 || screenCY > m_windowH + 50)
                         continue;
 
-                    // Draw city name below the hex
+                    // Draw city name + population below the hex
                     float labelY = screenCY + screenRadius * 0.9f;
+
+                    char label[128];
+                    snprintf(label, sizeof(label), "%s (%d)",
+                             plot.cityName.c_str(), plot.cityPopulation);
 
                     // Dark background behind text for readability
                     int tw = 0, th = 0;
-                    TTF_SizeText(m_fontSmall, plot.cityName.c_str(), &tw, &th);
+                    TTF_SizeText(m_fontSmall, label, &tw, &th);
                     SDL_Rect bg = {(int)(screenCX - tw / 2 - 2), (int)(labelY - 1),
                                    tw + 4, th + 2};
                     SDL_SetRenderDrawColor(m_renderer, 0, 0, 0, 180);
                     SDL_RenderFillRect(m_renderer, &bg);
 
-                    drawTextCentered(plot.cityName, (int)screenCX, (int)(labelY + th / 2),
+                    drawTextCentered(label, (int)screenCX, (int)(labelY + th / 2),
                                      m_fontSmall, 255, 255, 255);
                 }
             }
@@ -445,6 +495,9 @@ void Renderer::drawMinimap(const MapSnapshot& snapshot)
     int mmH = (int)(snapshot.height * scale);
     int mmX = m_windowW - mmW - margin;
     int mmY = m_windowH - mmH - margin;
+
+    // Store bounds for click-to-jump
+    m_mmX = mmX; m_mmY = mmY; m_mmW = mmW; m_mmH = mmH;
 
     // Dark background
     SDL_Rect bg = {mmX - 2, mmY - 2, mmW + 4, mmH + 4};
@@ -610,6 +663,32 @@ void Renderer::handleMouseMotion(int dx, int dy, bool anyDragButton)
     if (anyDragButton) {
         m_camera.offsetX -= dx / m_camera.zoom;
         m_camera.offsetY -= dy / m_camera.zoom;
+    }
+}
+
+void Renderer::handleMouseClick(int mouseX, int mouseY, int button, MapSnapshot& snapshot)
+{
+    // Left click on minimap: jump camera to that position
+    if (button == SDL_BUTTON_LEFT && m_showMinimap && m_mmW > 0 && m_mmH > 0) {
+        if (mouseX >= m_mmX && mouseX < m_mmX + m_mmW &&
+            mouseY >= m_mmY && mouseY < m_mmY + m_mmH)
+        {
+            std::lock_guard<std::mutex> lock(snapshot.mtx);
+            if (snapshot.width > 0 && snapshot.height > 0) {
+                // Convert minimap click to world coordinates
+                float fracX = (float)(mouseX - m_mmX) / m_mmW;
+                float fracY = (float)(mouseY - m_mmY) / m_mmH;
+
+                float mapPixelW = (snapshot.width - 1) * COL_SPACING + HEX_WIDTH;
+                float mapPixelH = (snapshot.height - 1) * ROW_SPACING + HEX_HEIGHT + ROW_SPACING / 2.0f;
+
+                // Center the viewport on the clicked world position
+                float worldX = fracX * mapPixelW;
+                float worldY = fracY * mapPixelH;
+                m_camera.offsetX = worldX - (m_windowW / m_camera.zoom) * 0.5f;
+                m_camera.offsetY = worldY - (m_windowH / m_camera.zoom) * 0.5f;
+            }
+        }
     }
 }
 

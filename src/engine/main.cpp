@@ -136,8 +136,11 @@ static void updateMapSnapshot()
         pd.featureType = (int)pPlot->getFeatureType();
         pd.ownerID = (int)pPlot->getOwnerINLINE();
         pd.isRiver = pPlot->isRiver();
+        pd.isNOfRiver = pPlot->isNOfRiver();
+        pd.isWOfRiver = pPlot->isWOfRiver();
         pd.isCity = pPlot->isCity();
         pd.unitCount = pPlot->getNumUnits();
+        pd.cityPopulation = 0;
 
         // Get owner's primary color
         pd.ownerColorR = pd.ownerColorG = pd.ownerColorB = 255; // default white
@@ -156,10 +159,11 @@ static void updateMapSnapshot()
             }
         }
 
-        // City name
+        // City name and population
         if (pd.isCity) {
             CvCity* pCity = pPlot->getPlotCity();
             if (pCity) {
+                pd.cityPopulation = pCity->getPopulation();
                 const wchar_t* wName = pCity->getName().GetCString();
                 // Convert wchar_t to char (ASCII subset)
                 if (wName) {
@@ -675,6 +679,12 @@ int main(int argc, char* argv[])
                                         SDL_GetMouseState(&mx, &my);
                                         renderer.handleMouseWheel(event.wheel.y, mx, my);
                                     }
+                                    break;
+                                case SDL_MOUSEBUTTONDOWN:
+                                    renderer.handleMouseClick(
+                                        event.button.x, event.button.y,
+                                        event.button.button, g_mapSnapshot
+                                    );
                                     break;
                                 case SDL_MOUSEMOTION:
                                     renderer.handleMouseMotion(

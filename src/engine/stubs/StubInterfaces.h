@@ -128,32 +128,61 @@ public:
 class StubInterfaceIFace : public CvDLLInterfaceIFaceBase
 {
 public:
+    // Real selection state (Phase 2)
+    CvUnit* m_pSelectedUnit = nullptr;
+    CvUnit* m_pLastSelectedUnit = nullptr;
+    CvCity* m_pSelectedCity = nullptr;
+    InterfaceModeTypes m_interfaceMode = INTERFACEMODE_SELECTION;
+    bool m_bEndTurnMessage = false;
+    bool m_bHasMovedUnit = false;
+    bool m_bForcePopup = false;
+    bool m_bCityScreenUp = false;
+
     void lookAtSelectionPlot(bool bRelease) override {} // STUB
 
-    bool canHandleAction(int iAction, CvPlot* pPlot, bool bTestVisible) override { return false; } // STUB
-    bool canDoInterfaceMode(InterfaceModeTypes eInterfaceMode, CvSelectionGroup* pSelectionGroup) override { return false; } // STUB
+    bool canHandleAction(int iAction, CvPlot* pPlot, bool bTestVisible) override { return true; }
+    bool canDoInterfaceMode(InterfaceModeTypes eInterfaceMode, CvSelectionGroup* pSelectionGroup) override { return true; }
 
     CvPlot* getLookAtPlot() override { return nullptr; } // STUB
-    CvPlot* getSelectionPlot() override { return nullptr; } // STUB
+    CvPlot* getSelectionPlot() override {
+        if (m_pSelectedUnit) return m_pSelectedUnit->plot();
+        return nullptr;
+    }
     CvUnit* getInterfacePlotUnit(const CvPlot* pPlot, int iIndex) override { return nullptr; } // STUB
-    CvUnit* getSelectionUnit(int iIndex) override { return nullptr; } // STUB
-    CvUnit* getHeadSelectedUnit() override { return nullptr; } // STUB
-    void selectUnit(CvUnit* pUnit, bool bClear, bool bToggle, bool bSound) override {} // STUB
-    void selectGroup(CvUnit* pUnit, bool bShift, bool bCtrl, bool bAlt) override {} // STUB
+    CvUnit* getSelectionUnit(int iIndex) override {
+        return (iIndex == 0) ? m_pSelectedUnit : nullptr;
+    }
+    CvUnit* getHeadSelectedUnit() override { return m_pSelectedUnit; }
+    void selectUnit(CvUnit* pUnit, bool bClear, bool bToggle, bool bSound) override {
+        if (bClear) m_pSelectedUnit = nullptr;
+        if (pUnit) {
+            m_pSelectedUnit = pUnit;
+            m_pLastSelectedUnit = pUnit;
+        }
+    }
+    void selectGroup(CvUnit* pUnit, bool bShift, bool bCtrl, bool bAlt) override {
+        if (pUnit) m_pSelectedUnit = pUnit;
+    }
     void selectAll(CvPlot* pPlot) override {} // STUB
 
-    bool removeFromSelectionList(CvUnit* pUnit) override { return false; } // STUB
+    bool removeFromSelectionList(CvUnit* pUnit) override {
+        if (m_pSelectedUnit == pUnit) { m_pSelectedUnit = nullptr; return true; }
+        return false;
+    }
     void makeSelectionListDirty() override {} // STUB
     bool mirrorsSelectionGroup() override { return false; } // STUB
-    bool canSelectionListFound() override { return false; } // STUB
+    bool canSelectionListFound() override {
+        if (m_pSelectedUnit && m_pSelectedUnit->isFound()) return true;
+        return false;
+    }
 
     void bringToTop(CvPopup* pPopup) override {} // STUB
     bool isPopupUp() override { return false; } // STUB
     bool isPopupQueued() override { return false; } // STUB
     bool isDiploOrPopupWaiting() override { return false; } // STUB
 
-    CvUnit* getLastSelectedUnit() override { return nullptr; } // STUB
-    void setLastSelectedUnit(CvUnit* pUnit) override {} // STUB
+    CvUnit* getLastSelectedUnit() override { return m_pLastSelectedUnit; }
+    void setLastSelectedUnit(CvUnit* pUnit) override { m_pLastSelectedUnit = pUnit; }
     void changePlotListColumn(int iChange) override {} // STUB
     CvPlot* getGotoPlot() override { return nullptr; } // STUB
     CvPlot* getSingleMoveGotoPlot() override { return nullptr; } // STUB
@@ -163,30 +192,49 @@ public:
     void playGeneralSound(int iSoundId, int iSoundType, NiPoint3 vPos) override {} // STUB
     void clearQueuedPopups() override {} // STUB
 
-    CvSelectionGroup* getSelectionList() override { return nullptr; } // STUB
-    void clearSelectionList() override {} // STUB
-    void insertIntoSelectionList(CvUnit* pUnit, bool bClear, bool bToggle, bool bGroup, bool bSound, bool bMinimalChange) override {} // STUB
+    CvSelectionGroup* getSelectionList() override {
+        if (m_pSelectedUnit) return m_pSelectedUnit->getGroup();
+        return nullptr;
+    }
+    void clearSelectionList() override { m_pSelectedUnit = nullptr; }
+    void insertIntoSelectionList(CvUnit* pUnit, bool bClear, bool bToggle, bool bGroup, bool bSound, bool bMinimalChange) override {
+        if (bClear) m_pSelectedUnit = nullptr;
+        if (pUnit) m_pSelectedUnit = pUnit;
+    }
     void selectionListPostChange() override {} // STUB
     void selectionListPreChange() override {} // STUB
     int getSymbolID(int iSymbol) override { return 0; } // STUB
     CLLNode<IDInfo>* deleteSelectionListNode(CLLNode<IDInfo>* pNode) override { return nullptr; } // STUB
     CLLNode<IDInfo>* nextSelectionListNode(CLLNode<IDInfo>* pNode) override { return nullptr; } // STUB
-    int getLengthSelectionList() override { return 0; } // STUB
+    int getLengthSelectionList() override {
+        return m_pSelectedUnit ? 1 : 0;
+    }
     CLLNode<IDInfo>* headSelectionListNode() override { return nullptr; } // STUB
 
-    void selectCity(CvCity* pNewValue, bool bTestProduction) override {} // STUB
+    void selectCity(CvCity* pNewValue, bool bTestProduction) override {
+        m_pSelectedCity = pNewValue;
+        m_bCityScreenUp = (pNewValue != nullptr);
+    }
     void selectLookAtCity(bool bAdd) override {} // STUB
-    void addSelectedCity(CvCity* pNewValue, bool bToggle) override {} // STUB
-    void clearSelectedCities() override {} // STUB
-    bool isCitySelected(CvCity* pCity) override { return false; } // STUB
-    CvCity* getHeadSelectedCity() override { return nullptr; } // STUB
-    bool isCitySelection() override { return false; } // STUB
+    void addSelectedCity(CvCity* pNewValue, bool bToggle) override {
+        m_pSelectedCity = pNewValue;
+    }
+    void clearSelectedCities() override { m_pSelectedCity = nullptr; m_bCityScreenUp = false; }
+    bool isCitySelected(CvCity* pCity) override { return m_pSelectedCity == pCity; }
+    CvCity* getHeadSelectedCity() override { return m_pSelectedCity; }
+    bool isCitySelection() override { return m_pSelectedCity != nullptr; }
     CLLNode<IDInfo>* nextSelectedCitiesNode(CLLNode<IDInfo>* pNode) override { return nullptr; } // STUB
     CLLNode<IDInfo>* headSelectedCitiesNode() override { return nullptr; } // STUB
 
     void addMessage(PlayerTypes ePlayer, bool bForce, int iLength, CvWString szString, LPCTSTR pszSound,
         InterfaceMessageTypes eType, LPCSTR pszIcon, ColorTypes eFlashColor,
-        int iFlashX, int iFlashY, bool bShowOffScreenArrows, bool bShowOnScreenArrows) override {} // STUB
+        int iFlashX, int iFlashY, bool bShowOffScreenArrows, bool bShowOnScreenArrows) override {
+        // Convert wstring to narrow for stderr logging
+        std::string msg;
+        for (size_t i = 0; i < szString.size() && i < 200; i++)
+            msg += (char)(szString[i] < 128 ? szString[i] : '?');
+        fprintf(stderr, "[MSG P%d] %s\n", (int)ePlayer, msg.c_str());
+    }
     void addCombatMessage(PlayerTypes ePlayer, CvWString szString) override {} // STUB
     void addQuestMessage(PlayerTypes ePlayer, CvWString szString, int iQuestId) override {} // STUB
     void showMessage(CvTalkingHeadMessage& msg) override {} // STUB
@@ -203,12 +251,12 @@ public:
     void setEndTurnCounter(int iNewValue) override {} // STUB
     void changeEndTurnCounter(int iChange) override {} // STUB
 
-    bool isCombatFocus() override { return false; } // STUB
+    bool isCombatFocus() override { return false; }
     void setCombatFocus(bool bNewValue) override {} // STUB
     void setDiploQueue(CvDiploParameters* pDiploParams, PlayerTypes ePlayer) override {} // STUB
 
-    bool isDirty(InterfaceDirtyBits eDirtyItem) override { return false; } // STUB
-    void setDirty(InterfaceDirtyBits eDirtyItem, bool bNewValue) override {} // STUB
+    bool isDirty(InterfaceDirtyBits eDirtyItem) override { return false; }
+    void setDirty(InterfaceDirtyBits eDirtyItem, bool bNewValue) override {} // real dirty tracking not needed
     void makeInterfaceDirty() override {} // STUB
     bool updateCursorType() override { return false; } // STUB
     void updatePythonScreens() override {} // STUB
@@ -229,10 +277,10 @@ public:
     bool isNetStatsVisible() override { return false; } // STUB
 
     int getOriginalPlotCount() override { return 0; } // STUB
-    bool isCityScreenUp() override { return false; } // STUB
-    bool isEndTurnMessage() override { return false; } // STUB
-    void setInterfaceMode(InterfaceModeTypes eNewValue) override {} // STUB
-    InterfaceModeTypes getInterfaceMode() override { return (InterfaceModeTypes)0; } // STUB
+    bool isCityScreenUp() override { return m_bCityScreenUp; }
+    bool isEndTurnMessage() override { return m_bEndTurnMessage; }
+    void setInterfaceMode(InterfaceModeTypes eNewValue) override { m_interfaceMode = eNewValue; }
+    InterfaceModeTypes getInterfaceMode() override { return m_interfaceMode; }
     InterfaceVisibility getShowInterface() override { return (InterfaceVisibility)0; } // STUB
     CvPlot* getMouseOverPlot() override { return nullptr; } // STUB
     void setFlashing(PlayerTypes eWho, bool bFlashing) override {} // STUB
@@ -242,13 +290,13 @@ public:
 
     void setMinimapColor(MinimapModeTypes eMinimapMode, int iX, int iY, ColorTypes eColor, float fAlpha) override {} // STUB
     unsigned char* getMinimapBaseTexture() const override { return nullptr; } // STUB
-    void setEndTurnMessage(bool bNewValue) override {} // STUB
+    void setEndTurnMessage(bool bNewValue) override { m_bEndTurnMessage = bNewValue; }
 
-    bool isHasMovedUnit() override { return false; } // STUB
-    void setHasMovedUnit(bool bNewValue) override {} // STUB
+    bool isHasMovedUnit() override { return m_bHasMovedUnit; }
+    void setHasMovedUnit(bool bNewValue) override { m_bHasMovedUnit = bNewValue; }
 
-    bool isForcePopup() override { return false; } // STUB
-    void setForcePopup(bool bNewValue) override {} // STUB
+    bool isForcePopup() override { return m_bForcePopup; }
+    void setForcePopup(bool bNewValue) override { m_bForcePopup = bNewValue; }
 
     void lookAtCityOffset(int iCity) override {} // STUB
 

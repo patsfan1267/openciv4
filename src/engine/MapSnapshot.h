@@ -1,7 +1,7 @@
 #pragma once
 // MapSnapshot — Thread-safe snapshot of the game map for rendering
 //
-// The game thread writes this after each turn.
+// The game thread writes this after each update().
 // The render thread reads it each frame.
 // Access is synchronized via the embedded mutex.
 
@@ -9,6 +9,35 @@
 #include <string>
 #include <mutex>
 #include <cstdint>
+#include <queue>
+
+// ---------- Command queue (render thread → game thread) ----------
+
+struct GameCommand {
+    enum Type {
+        END_TURN,
+        SELECT_UNIT,
+        DESELECT,
+        MOVE_UNIT,
+        FOUND_CITY,
+        SET_PRODUCTION,
+        SET_RESEARCH,
+        BUILD_IMPROVEMENT,
+        FORTIFY,
+        SLEEP,
+        SKIP_TURN,
+        CYCLE_UNIT,
+        GOTO_PLOT,
+        SELECT_CITY,
+        CLOSE_CITY,
+    };
+    Type type;
+    int id = -1;        // unit ID, city ID, or tech/building/unit type
+    int x = -1, y = -1; // target coordinates
+    int param = -1;     // extra parameter (build type, isUnit flag, etc.)
+};
+
+// ---------- Per-plot data ----------
 
 struct PlotData {
     int terrainType;    // TerrainTypes enum value
@@ -24,17 +53,83 @@ struct PlotData {
     int cityPopulation; // 0 if not a city
     uint8_t ownerColorR, ownerColorG, ownerColorB; // owner's primary color
     std::string cityName;  // empty if not a city
+
+    // Phase 2: per-plot unit data
+    int firstUnitID = -1;       // ID of first unit on this plot (-1 if none)
+    int firstUnitOwner = -1;    // owner of first unit
+    bool hasHumanUnit = false;  // any unit owned by player 0?
+    std::string firstUnitName;  // type name of first unit (e.g. "Warrior")
+    int firstUnitHP = 100;      // health percentage 0-100
+    int firstUnitMoves = 0;     // movement points remaining (x100)
+    int firstUnitMaxMoves = 0;  // max movement points (x100)
+    int firstUnitStrength = 0;  // combat strength (x100)
+    bool firstUnitCanFound = false; // can this unit found a city?
+    int improvementType = -1;   // ImprovementTypes (-1 = none)
+
+    // City details (populated when a city is selected)
+    int cityID = -1;
 };
+
+// ---------- Production/tech items for UI panels ----------
+
+struct ProductionItem {
+    int type;           // UnitTypes or BuildingTypes
+    bool isUnit;        // true = unit, false = building
+    std::string name;
+    int turns;          // turns to complete
+};
+
+struct TechItem {
+    int techID;
+    std::string name;
+    int turnsLeft;
+};
+
+struct BuildItem {
+    int buildType;      // BuildTypes index
+    std::string name;
+    int turnsLeft;
+};
+
+// ---------- City detail (populated on city selection) ----------
+
+struct CityDetail {
+    int cityID = -1;
+    std::string name;
+    int population = 0;
+    int foodRate = 0;
+    int productionRate = 0;
+    int commerceRate = 0;
+    int foodStored = 0;
+    int foodNeeded = 0;
+    std::string currentProduction;
+    int productionTurns = 0;
+    int productionStored = 0;
+    int productionNeeded = 0;
+    std::vector<ProductionItem> availableProduction;
+    int garrisonCount = 0;
+};
+
+// ---------- Player info ----------
 
 struct PlayerInfo {
     bool alive = false;
+    bool isHuman = false;
     int numCities = 0;
     int numUnits = 0;
     int totalPop = 0;
     int score = 0;
+    int gold = 0;
+    int goldRate = 0;
+    int scienceRate = 0;  // beakers per turn
+    int currentResearch = -1;
+    std::string currentResearchName;
+    int researchTurns = 0;
     uint8_t colorR = 200, colorG = 200, colorB = 200;
     std::string civName;
 };
+
+// ---------- Map snapshot ----------
 
 struct MapSnapshot {
     int width = 0;
@@ -49,6 +144,28 @@ struct MapSnapshot {
     PlayerInfo players[18];       // MAX_CIV_PLAYERS = 18
     int numPlayers = 0;
     std::mutex mtx;
+
+    // Phase 2: selection + turn state
+    int selectedUnitID = -1;
+    int selectedUnitX = -1;
+    int selectedUnitY = -1;
+    bool isHumanTurn = false;
+    bool waitingForEndTurn = false;
+    int activePlayerID = -1;
+    int humanPlayerID = 0;
+
+    // City detail (populated when a city is selected)
+    bool cityScreenOpen = false;
+    CityDetail selectedCity;
+
+    // Tech picker
+    std::vector<TechItem> availableTechs;
+
+    // Worker builds (for selected worker)
+    std::vector<BuildItem> availableBuilds;
+
+    // Game messages
+    std::vector<std::string> gameMessages;  // recent messages for display
 
     const PlotData& getPlot(int x, int y) const {
         return plots[y * width + x];

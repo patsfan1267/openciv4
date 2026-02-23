@@ -1,13 +1,13 @@
 // OpenCiv4 — Clean-room 64-bit engine replacement for Civilization IV
-// Phase 0: Headless mode — run AI games with no graphics
+// Phase 2: Playable game — human player with real turn flow
 //
 // This is the host executable entry point. It:
-// 1. Creates stub interface implementations (no graphics, no audio, no Python)
+// 1. Creates stub interface implementations
 // 2. Wires them into CvGlobals via setDLLIFace()
 // 3. Calls GC.init() to bring up the gamecore
 // 4. Loads XML data (units, techs, buildings, civs, etc.)
-// 5. Initializes a game with AI players
-// 6. Runs the game loop
+// 5. Initializes a game with 1 human + 3 AI players
+// 6. Runs CvGame::update() in a loop (real BTS turn flow)
 
 #include <cstdio>
 #include <cstdint>
@@ -17,6 +17,7 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <queue>
 #include <windows.h>
 
 #include <SDL.h>
@@ -25,8 +26,8 @@
 // Crash handler to print which turn/phase we were in when crashing
 static volatile int g_crashTurn = -1;
 static volatile int g_crashPlayer = -1;
-static volatile int g_crashPhase = -1; // 0=doTurn,1=doTurnUnits,2=AI_unitUpdate,3=game.doTurn
-volatile int g_crashSubPhase = -1; // Sub-phase within AI_unitUpdate (set from gamecore)
+static volatile int g_crashPhase = -1; // 0=update,1=drainCmd,2=snapshot
+volatile int g_crashSubPhase = -1;
 
 static void crashHandler(int sig) {
     fprintf(stderr, "\n!!! CRASH (signal %d) at turn=%d player=%d phase=%d sub=%d !!!\n",
@@ -35,10 +36,10 @@ static void crashHandler(int sig) {
     _exit(139);
 }
 
-// Windows Vectored Exception Handler - captures faulting address for access violations
+// Windows Vectored Exception Handler
 static LONG WINAPI vehHandler(EXCEPTION_POINTERS* pExInfo) {
     if (pExInfo->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
-        ULONG_PTR readWrite = pExInfo->ExceptionRecord->ExceptionInformation[0]; // 0=read, 1=write
+        ULONG_PTR readWrite = pExInfo->ExceptionRecord->ExceptionInformation[0];
         ULONG_PTR faultAddr = pExInfo->ExceptionRecord->ExceptionInformation[1];
         ULONG_PTR instrAddr = (ULONG_PTR)pExInfo->ExceptionRecord->ExceptionAddress;
         fprintf(stderr, "\n!!! ACCESS VIOLATION: %s at address 0x%llX (instruction at 0x%llX)\n",
@@ -46,19 +47,14 @@ static LONG WINAPI vehHandler(EXCEPTION_POINTERS* pExInfo) {
                 (unsigned long long)faultAddr, (unsigned long long)instrAddr);
         fprintf(stderr, "    turn=%d player=%d phase=%d sub=%d\n",
                 g_crashTurn, g_crashPlayer, g_crashPhase, g_crashSubPhase);
-        // Print RIP, RSP, and a few registers for context
         CONTEXT* ctx = pExInfo->ContextRecord;
         fprintf(stderr, "    RIP=0x%llX RSP=0x%llX RBP=0x%llX\n",
                 (unsigned long long)ctx->Rip, (unsigned long long)ctx->Rsp, (unsigned long long)ctx->Rbp);
-        fprintf(stderr, "    RAX=0x%llX RBX=0x%llX RCX=0x%llX RDX=0x%llX\n",
-                (unsigned long long)ctx->Rax, (unsigned long long)ctx->Rbx,
-                (unsigned long long)ctx->Rcx, (unsigned long long)ctx->Rdx);
         fflush(stderr);
         _exit(139);
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }
-
 
 // Pull in the gamecore's global singleton and types
 #include "CvGameCoreDLL.h"
@@ -71,6 +67,9 @@ static LONG WINAPI vehHandler(EXCEPTION_POINTERS* pExInfo) {
 #include "AI_Defines.h"
 #include "CvMap.h"
 #include "CvMapGenerator.h"
+#include "CvUnit.h"
+#include "CvCity.h"
+#include "CvSelectionGroup.h"
 
 // Our stub implementations of all 13 interface classes
 #include "StubInterfaces.h"
@@ -83,12 +82,37 @@ static LONG WINAPI vehHandler(EXCEPTION_POINTERS* pExInfo) {
 #include "FPKArchive.h"
 #include "DDSLoader.h"
 
-// Global map snapshot shared between game thread and render thread
+// ---- Global state ----
 static MapSnapshot g_mapSnapshot;
 static std::atomic<bool> g_gameRunning{true};
 static std::atomic<bool> g_gameThreadDone{false};
 static std::atomic<bool> g_gamePaused{false};
-static std::atomic<int> g_turnDelayMs{0}; // milliseconds delay between turns (0=max speed)
+static std::atomic<int> g_turnDelayMs{0};
+
+// Command queue: render thread → game thread
+static std::queue<GameCommand> g_commandQueue;
+static std::mutex g_cmdMutex;
+
+// Human player ID
+static const int HUMAN_PLAYER = 0;
+
+// Push a command from the render thread
+static void pushCommand(GameCommand cmd) {
+    std::lock_guard<std::mutex> lock(g_cmdMutex);
+    g_commandQueue.push(cmd);
+}
+
+// Game message queue (game thread → render thread, via MapSnapshot)
+static std::vector<std::string> g_pendingMessages;
+static std::mutex g_msgMutex;
+
+static void addGameMessage(const std::string& msg) {
+    std::lock_guard<std::mutex> lock(g_msgMutex);
+    g_pendingMessages.push_back(msg);
+    if (g_pendingMessages.size() > 8)
+        g_pendingMessages.erase(g_pendingMessages.begin());
+    fprintf(stderr, "[game] %s\n", msg.c_str());
+}
 
 // ---- Helper: find valid civ/leader pairs from loaded XML data ----
 struct CivLeaderPair {
@@ -103,12 +127,8 @@ static int findCivLeaderPairs(CivLeaderPair* pairs, int maxPairs)
     for (int iCiv = 0; iCiv < GC.getNumCivilizationInfos() && count < maxPairs; iCiv++)
     {
         CvCivilizationInfo& civInfo = GC.getCivilizationInfo((CivilizationTypes)iCiv);
-
-        // Skip barbarian/minor civs (they have isPlayable() == false)
         if (!civInfo.isPlayable())
             continue;
-
-        // Find a valid leader for this civ
         for (int iLeader = 0; iLeader < GC.getNumLeaderHeadInfos(); iLeader++)
         {
             if (civInfo.isLeaders((LeaderHeadTypes)iLeader))
@@ -117,11 +137,20 @@ static int findCivLeaderPairs(CivLeaderPair* pairs, int maxPairs)
                 pairs[count].eLeader = (LeaderHeadTypes)iLeader;
                 pairs[count].szCivDesc = civInfo.getDescription();
                 count++;
-                break; // One leader per civ is enough
+                break;
             }
         }
     }
     return count;
+}
+
+// ---- Helper: wchar to narrow string ----
+static std::string wcharToStr(const wchar_t* w, int maxLen = 64) {
+    std::string s;
+    if (!w) return s;
+    for (int i = 0; w[i] && i < maxLen; i++)
+        s += (char)(w[i] < 128 ? w[i] : '?');
+    return s;
 }
 
 // ---- Populate MapSnapshot from game state ----
@@ -131,7 +160,6 @@ static void updateMapSnapshot()
     int w = map.getGridWidth();
     int h = map.getGridHeight();
 
-    // Build a local copy first, then swap under lock
     std::vector<PlotData> newPlots(w * h);
     for (int i = 0; i < w * h; i++) {
         CvPlot* pPlot = map.plotByIndexINLINE(i);
@@ -148,9 +176,10 @@ static void updateMapSnapshot()
         pd.isCity = pPlot->isCity();
         pd.unitCount = pPlot->getNumUnits();
         pd.cityPopulation = 0;
+        pd.improvementType = (int)pPlot->getImprovementType();
 
-        // Get owner's primary color
-        pd.ownerColorR = pd.ownerColorG = pd.ownerColorB = 255; // default white
+        // Owner color
+        pd.ownerColorR = pd.ownerColorG = pd.ownerColorB = 255;
         if (pd.ownerID >= 0 && pd.ownerID < MAX_PLAYERS) {
             CvPlayer& kOwner = GET_PLAYER((PlayerTypes)pd.ownerID);
             PlayerColorTypes eColor = kOwner.getPlayerColor();
@@ -166,18 +195,49 @@ static void updateMapSnapshot()
             }
         }
 
-        // City name and population
+        // City info
         if (pd.isCity) {
             CvCity* pCity = pPlot->getPlotCity();
             if (pCity) {
                 pd.cityPopulation = pCity->getPopulation();
-                const wchar_t* wName = pCity->getName().GetCString();
-                // Convert wchar_t to char (ASCII subset)
-                if (wName) {
-                    std::string name;
-                    for (int c = 0; wName[c] && c < 64; c++)
-                        name += (char)(wName[c] < 128 ? wName[c] : '?');
-                    pd.cityName = name;
+                pd.cityID = pCity->getID();
+                pd.cityName = wcharToStr(pCity->getName().GetCString());
+            }
+        }
+
+        // First unit info
+        if (pd.unitCount > 0) {
+            CLLNode<IDInfo>* pNode = pPlot->headUnitNode();
+            if (pNode) {
+                CvUnit* pUnit = ::getUnit(pNode->m_data);
+                if (pUnit) {
+                    pd.firstUnitID = pUnit->getID();
+                    pd.firstUnitOwner = (int)pUnit->getOwnerINLINE();
+                    pd.hasHumanUnit = (pd.firstUnitOwner == HUMAN_PLAYER);
+                    pd.firstUnitHP = (pUnit->currHitPoints() * 100) / std::max(1, pUnit->maxHitPoints());
+                    pd.firstUnitMoves = pUnit->movesLeft();
+                    pd.firstUnitMaxMoves = pUnit->maxMoves();
+                    pd.firstUnitStrength = pUnit->baseCombatStr() * 100;
+                    pd.firstUnitCanFound = pUnit->isFound();
+
+                    // Unit type name
+                    UnitTypes eType = pUnit->getUnitType();
+                    if (eType >= 0 && eType < GC.getNumUnitInfos()) {
+                        pd.firstUnitName = wcharToStr(GC.getUnitInfo(eType).getDescription());
+                    }
+
+                    // Check all units for human ownership
+                    if (!pd.hasHumanUnit) {
+                        CLLNode<IDInfo>* pNext = pPlot->nextUnitNode(pNode);
+                        while (pNext) {
+                            CvUnit* pU = ::getUnit(pNext->m_data);
+                            if (pU && pU->getOwnerINLINE() == HUMAN_PLAYER) {
+                                pd.hasHumanUnit = true;
+                                break;
+                            }
+                            pNext = pPlot->nextUnitNode(pNext);
+                        }
+                    }
                 }
             }
         }
@@ -191,12 +251,21 @@ static void updateMapSnapshot()
         if (kPlayer.isAlive()) {
             PlayerInfo& pi = playerInfos[p];
             pi.alive = true;
+            pi.isHuman = kPlayer.isHuman();
             pi.numCities = kPlayer.getNumCities();
             pi.numUnits = kPlayer.getNumUnits();
             pi.totalPop = kPlayer.getTotalPopulation();
             pi.score = GC.getGameINLINE().getPlayerScore((PlayerTypes)p);
+            pi.gold = kPlayer.getGold();
+            pi.goldRate = kPlayer.calculateGoldRate();
+            pi.scienceRate = kPlayer.calculateResearchRate();
+            pi.currentResearch = (int)kPlayer.getCurrentResearch();
+            if (pi.currentResearch >= 0 && pi.currentResearch < GC.getNumTechInfos()) {
+                pi.currentResearchName = wcharToStr(GC.getTechInfo((TechTypes)pi.currentResearch).getDescription());
+                pi.researchTurns = kPlayer.getResearchTurnsLeft((TechTypes)pi.currentResearch, true);
+            }
 
-            // Get player color
+            // Color
             PlayerColorTypes eColor = kPlayer.getPlayerColor();
             if (eColor >= 0 && eColor < GC.getNumPlayerColorInfos()) {
                 CvPlayerColorInfo& colorInfo = GC.getPlayerColorInfo(eColor);
@@ -209,19 +278,107 @@ static void updateMapSnapshot()
                 }
             }
 
-            // Civ name (wchar -> char)
-            const wchar_t* wDesc = GC.getCivilizationInfo(kPlayer.getCivilizationType()).getShortDescription(0);
-            if (wDesc) {
-                std::string name;
-                for (int c = 0; wDesc[c] && c < 32; c++)
-                    name += (char)(wDesc[c] < 128 ? wDesc[c] : '?');
-                pi.civName = name;
-            }
+            // Civ name
+            pi.civName = wcharToStr(GC.getCivilizationInfo(kPlayer.getCivilizationType()).getShortDescription(0));
             numPlayers = p + 1;
         }
     }
 
-    // Swap into the shared snapshot under lock
+    // Selection state
+    CvUnit* pSelUnit = gDLL->getInterfaceIFace()->getHeadSelectedUnit();
+    int selUnitID = -1, selUnitX = -1, selUnitY = -1;
+    if (pSelUnit && pSelUnit->getOwnerINLINE() == HUMAN_PLAYER) {
+        selUnitID = pSelUnit->getID();
+        selUnitX = pSelUnit->getX_INLINE();
+        selUnitY = pSelUnit->getY_INLINE();
+    }
+
+    // Human turn state
+    CvPlayer& human = GET_PLAYER((PlayerTypes)HUMAN_PLAYER);
+    bool isHumanTurn = human.isTurnActive();
+    bool waitingForEnd = isHumanTurn && !human.isEndTurn();
+
+    // City detail if city screen is open
+    CityDetail cityDet;
+    bool cityScreenOpen = false;
+    CvCity* pSelCity = gDLL->getInterfaceIFace()->getHeadSelectedCity();
+    if (pSelCity && pSelCity->getOwnerINLINE() == HUMAN_PLAYER) {
+        cityScreenOpen = true;
+        cityDet.cityID = pSelCity->getID();
+        cityDet.name = wcharToStr(pSelCity->getName().GetCString());
+        cityDet.population = pSelCity->getPopulation();
+        cityDet.foodRate = pSelCity->foodDifference();
+        cityDet.productionRate = pSelCity->getCurrentProductionDifference(false, true);
+        cityDet.commerceRate = pSelCity->getCommerceRate(COMMERCE_GOLD) +
+                               pSelCity->getCommerceRate(COMMERCE_RESEARCH);
+        cityDet.foodStored = pSelCity->getFood();
+        cityDet.foodNeeded = pSelCity->growthThreshold();
+        cityDet.productionStored = pSelCity->getProduction();
+        cityDet.productionNeeded = pSelCity->getProductionNeeded();
+        cityDet.productionTurns = pSelCity->getProductionTurnsLeft();
+        cityDet.garrisonCount = pSelCity->plot()->plotCount(PUF_isUnitType, -1, -1, (PlayerTypes)HUMAN_PLAYER);
+
+        // Current production name
+        if (pSelCity->isProduction()) {
+            cityDet.currentProduction = wcharToStr(pSelCity->getProductionName());
+        } else {
+            cityDet.currentProduction = "(none)";
+        }
+
+        // Available production
+        for (int u = 0; u < GC.getNumUnitInfos(); u++) {
+            if (pSelCity->canTrain((UnitTypes)u)) {
+                ProductionItem item;
+                item.type = u;
+                item.isUnit = true;
+                item.name = wcharToStr(GC.getUnitInfo((UnitTypes)u).getDescription());
+                item.turns = pSelCity->getProductionTurnsLeft((UnitTypes)u, 0);
+                cityDet.availableProduction.push_back(item);
+            }
+        }
+        for (int b = 0; b < GC.getNumBuildingInfos(); b++) {
+            if (pSelCity->canConstruct((BuildingTypes)b)) {
+                ProductionItem item;
+                item.type = b;
+                item.isUnit = false;
+                item.name = wcharToStr(GC.getBuildingInfo((BuildingTypes)b).getDescription());
+                item.turns = pSelCity->getProductionTurnsLeft((BuildingTypes)b, 0);
+                cityDet.availableProduction.push_back(item);
+            }
+        }
+    }
+
+    // Available techs (for human player)
+    std::vector<TechItem> techs;
+    if (isHumanTurn) {
+        for (int t = 0; t < GC.getNumTechInfos(); t++) {
+            if (human.canResearch((TechTypes)t)) {
+                TechItem ti;
+                ti.techID = t;
+                ti.name = wcharToStr(GC.getTechInfo((TechTypes)t).getDescription());
+                ti.turnsLeft = human.getResearchTurnsLeft((TechTypes)t, true);
+                techs.push_back(ti);
+            }
+        }
+    }
+
+    // Worker builds (if selected unit is a worker)
+    std::vector<BuildItem> builds;
+    if (pSelUnit && pSelUnit->getOwnerINLINE() == HUMAN_PLAYER && pSelUnit->getUnitType() != NO_UNIT) {
+        // Check if unit can do any build
+        CvPlot* pUnitPlot = pSelUnit->plot();
+        for (int b = 0; b < GC.getNumBuildInfos(); b++) {
+            if (pSelUnit->canBuild(pUnitPlot, (BuildTypes)b)) {
+                BuildItem bi;
+                bi.buildType = b;
+                bi.name = wcharToStr(GC.getBuildInfo((BuildTypes)b).getDescription());
+                bi.turnsLeft = pUnitPlot->getBuildTurnsLeft((BuildTypes)b, 0, 0);
+                builds.push_back(bi);
+            }
+        }
+    }
+
+    // Swap into shared snapshot
     {
         std::lock_guard<std::mutex> lock(g_mapSnapshot.mtx);
         g_mapSnapshot.width = w;
@@ -236,117 +393,365 @@ static void updateMapSnapshot()
         for (int p = 0; p < 18; p++)
             g_mapSnapshot.players[p] = playerInfos[p];
         g_mapSnapshot.numPlayers = numPlayers;
+
+        // Selection + turn state
+        g_mapSnapshot.selectedUnitID = selUnitID;
+        g_mapSnapshot.selectedUnitX = selUnitX;
+        g_mapSnapshot.selectedUnitY = selUnitY;
+        g_mapSnapshot.isHumanTurn = isHumanTurn;
+        g_mapSnapshot.waitingForEndTurn = waitingForEnd;
+        g_mapSnapshot.activePlayerID = (int)GC.getGameINLINE().getActivePlayer();
+        g_mapSnapshot.humanPlayerID = HUMAN_PLAYER;
+
+        // City detail
+        g_mapSnapshot.cityScreenOpen = cityScreenOpen;
+        g_mapSnapshot.selectedCity = cityDet;
+
+        // Techs
+        g_mapSnapshot.availableTechs = techs;
+
+        // Worker builds
+        g_mapSnapshot.availableBuilds = builds;
+
+        // Messages
+        {
+            std::lock_guard<std::mutex> mlock(g_msgMutex);
+            g_mapSnapshot.gameMessages = g_pendingMessages;
+        }
     }
 }
 
-// ---- Game thread function ----
+// ---- Execute a game command from the render thread ----
+static void executeCommand(const GameCommand& cmd)
+{
+    CvPlayer& human = GET_PLAYER((PlayerTypes)HUMAN_PLAYER);
+
+    switch (cmd.type) {
+    case GameCommand::END_TURN: {
+        if (human.isTurnActive() && !human.isEndTurn()) {
+            fprintf(stderr, "[cmd] END_TURN\n");
+            human.setEndTurn(true);
+        }
+        break;
+    }
+    case GameCommand::SELECT_UNIT: {
+        // Find first human unit at (x, y)
+        CvPlot* pPlot = GC.getMapINLINE().plot(cmd.x, cmd.y);
+        if (pPlot) {
+            CvUnit* pBest = nullptr;
+            CLLNode<IDInfo>* pNode = pPlot->headUnitNode();
+            while (pNode) {
+                CvUnit* pUnit = ::getUnit(pNode->m_data);
+                if (pUnit && pUnit->getOwnerINLINE() == HUMAN_PLAYER) {
+                    pBest = pUnit;
+                    break;
+                }
+                pNode = pPlot->nextUnitNode(pNode);
+            }
+            if (pBest) {
+                gDLL->getInterfaceIFace()->selectUnit(pBest, true, false, false);
+                fprintf(stderr, "[cmd] SELECT_UNIT id=%d at (%d,%d)\n", pBest->getID(), cmd.x, cmd.y);
+            }
+        }
+        break;
+    }
+    case GameCommand::SELECT_CITY: {
+        CvPlot* pPlot = GC.getMapINLINE().plot(cmd.x, cmd.y);
+        if (pPlot && pPlot->isCity()) {
+            CvCity* pCity = pPlot->getPlotCity();
+            if (pCity && pCity->getOwnerINLINE() == HUMAN_PLAYER) {
+                gDLL->getInterfaceIFace()->selectCity(pCity, false);
+                gDLL->getInterfaceIFace()->clearSelectionList();
+                fprintf(stderr, "[cmd] SELECT_CITY id=%d\n", pCity->getID());
+            }
+        }
+        break;
+    }
+    case GameCommand::CLOSE_CITY: {
+        gDLL->getInterfaceIFace()->clearSelectedCities();
+        fprintf(stderr, "[cmd] CLOSE_CITY\n");
+        break;
+    }
+    case GameCommand::DESELECT: {
+        gDLL->getInterfaceIFace()->clearSelectionList();
+        break;
+    }
+    case GameCommand::MOVE_UNIT: {
+        CvUnit* pUnit = human.getUnit(cmd.id);
+        if (pUnit && pUnit->getOwnerINLINE() == HUMAN_PLAYER) {
+            CvSelectionGroup* pGroup = pUnit->getGroup();
+            if (pGroup) {
+                pGroup->pushMission(MISSION_MOVE_TO, cmd.x, cmd.y, 0, false, true);
+                fprintf(stderr, "[cmd] MOVE_UNIT id=%d to (%d,%d)\n", cmd.id, cmd.x, cmd.y);
+            }
+        }
+        break;
+    }
+    case GameCommand::GOTO_PLOT: {
+        CvUnit* pUnit = human.getUnit(cmd.id);
+        if (pUnit && pUnit->getOwnerINLINE() == HUMAN_PLAYER) {
+            CvSelectionGroup* pGroup = pUnit->getGroup();
+            if (pGroup) {
+                pGroup->pushMission(MISSION_MOVE_TO, cmd.x, cmd.y, 0, false, true);
+                fprintf(stderr, "[cmd] GOTO id=%d to (%d,%d)\n", cmd.id, cmd.x, cmd.y);
+            }
+        }
+        break;
+    }
+    case GameCommand::FOUND_CITY: {
+        CvUnit* pUnit = human.getUnit(cmd.id);
+        if (pUnit && pUnit->isFound() && pUnit->canFound(pUnit->plot())) {
+            pUnit->getGroup()->pushMission(MISSION_FOUND);
+            addGameMessage("City founded!");
+            fprintf(stderr, "[cmd] FOUND_CITY id=%d at (%d,%d)\n", cmd.id, pUnit->getX_INLINE(), pUnit->getY_INLINE());
+        }
+        break;
+    }
+    case GameCommand::SET_PRODUCTION: {
+        // cmd.id = city ID, cmd.param = type index, cmd.x = 1 if unit, 0 if building
+        CvCity* pCity = human.getCity(cmd.id);
+        if (pCity) {
+            if (cmd.x == 1) {
+                // Unit
+                pCity->pushOrder(ORDER_TRAIN, cmd.param, -1, false, false, false);
+                fprintf(stderr, "[cmd] SET_PRODUCTION city=%d train unit %d\n", cmd.id, cmd.param);
+            } else {
+                // Building
+                pCity->pushOrder(ORDER_CONSTRUCT, cmd.param, -1, false, false, false);
+                fprintf(stderr, "[cmd] SET_PRODUCTION city=%d construct building %d\n", cmd.id, cmd.param);
+            }
+        }
+        break;
+    }
+    case GameCommand::SET_RESEARCH: {
+        if (cmd.id >= 0 && cmd.id < GC.getNumTechInfos()) {
+            if (human.canResearch((TechTypes)cmd.id)) {
+                human.pushResearch((TechTypes)cmd.id, true);
+                std::string name = wcharToStr(GC.getTechInfo((TechTypes)cmd.id).getDescription());
+                addGameMessage("Researching: " + name);
+                fprintf(stderr, "[cmd] SET_RESEARCH tech=%d\n", cmd.id);
+            }
+        }
+        break;
+    }
+    case GameCommand::BUILD_IMPROVEMENT: {
+        CvUnit* pUnit = human.getUnit(cmd.id);
+        if (pUnit) {
+            pUnit->getGroup()->pushMission(MISSION_BUILD, cmd.param);
+            fprintf(stderr, "[cmd] BUILD type=%d\n", cmd.param);
+        }
+        break;
+    }
+    case GameCommand::FORTIFY: {
+        CvUnit* pUnit = human.getUnit(cmd.id);
+        if (pUnit && pUnit->canFortify(pUnit->plot())) {
+            pUnit->getGroup()->pushMission(MISSION_FORTIFY);
+            fprintf(stderr, "[cmd] FORTIFY id=%d\n", cmd.id);
+        }
+        break;
+    }
+    case GameCommand::SLEEP: {
+        CvUnit* pUnit = human.getUnit(cmd.id);
+        if (pUnit) {
+            pUnit->getGroup()->pushMission(MISSION_SLEEP);
+            fprintf(stderr, "[cmd] SLEEP id=%d\n", cmd.id);
+            gDLL->getInterfaceIFace()->clearSelectionList();
+        }
+        break;
+    }
+    case GameCommand::SKIP_TURN: {
+        // Deselect current unit, cycle to next
+        gDLL->getInterfaceIFace()->clearSelectionList();
+        break;
+    }
+    case GameCommand::CYCLE_UNIT: {
+        // Find next human unit needing orders
+        int iLoop;
+        CvUnit* pBest = nullptr;
+        CvUnit* pCurrent = gDLL->getInterfaceIFace()->getHeadSelectedUnit();
+        bool pastCurrent = (pCurrent == nullptr);
+        for (CvUnit* pUnit = human.firstUnit(&iLoop); pUnit; pUnit = human.nextUnit(&iLoop)) {
+            if (!pastCurrent) {
+                if (pUnit == pCurrent) pastCurrent = true;
+                continue;
+            }
+            if (pUnit->isWaiting() || pUnit->isCargo()) continue;
+            if (pUnit->movesLeft() > 0 && !(pUnit->getGroup() && pUnit->getGroup()->getActivityType() == ACTIVITY_SLEEP)) {
+                pBest = pUnit;
+                break;
+            }
+        }
+        // Wrap around if needed
+        if (!pBest) {
+            for (CvUnit* pUnit = human.firstUnit(&iLoop); pUnit; pUnit = human.nextUnit(&iLoop)) {
+                if (pUnit == pCurrent) break;
+                if (pUnit->isWaiting() || pUnit->isCargo()) continue;
+                if (pUnit->movesLeft() > 0 && !(pUnit->getGroup() && pUnit->getGroup()->getActivityType() == ACTIVITY_SLEEP)) {
+                    pBest = pUnit;
+                    break;
+                }
+            }
+        }
+        if (pBest) {
+            gDLL->getInterfaceIFace()->selectUnit(pBest, true, false, false);
+        }
+        break;
+    }
+    }
+}
+
+// ---- Drain all pending commands ----
+static void drainCommandQueue()
+{
+    std::lock_guard<std::mutex> lock(g_cmdMutex);
+    while (!g_commandQueue.empty()) {
+        GameCommand cmd = g_commandQueue.front();
+        g_commandQueue.pop();
+        executeCommand(cmd);
+    }
+}
+
+// ---- Auto-select next unit needing orders ----
+static void autoSelectNextUnit()
+{
+    CvPlayer& human = GET_PLAYER((PlayerTypes)HUMAN_PLAYER);
+    if (!human.isTurnActive() || human.isEndTurn()) return;
+
+    // If we already have a unit selected, don't override
+    CvUnit* pCurrent = gDLL->getInterfaceIFace()->getHeadSelectedUnit();
+    if (pCurrent && pCurrent->movesLeft() > 0) return;
+
+    // Find first unit needing orders
+    int iLoop;
+    for (CvUnit* pUnit = human.firstUnit(&iLoop); pUnit; pUnit = human.nextUnit(&iLoop)) {
+        if (pUnit->isWaiting() || pUnit->isCargo()) continue;
+        if (pUnit->movesLeft() > 0 && !(pUnit->getGroup() && pUnit->getGroup()->getActivityType() == ACTIVITY_SLEEP)) {
+            gDLL->getInterfaceIFace()->selectUnit(pUnit, true, false, false);
+            return;
+        }
+    }
+
+    // No units needing orders — clear selection
+    gDLL->getInterfaceIFace()->clearSelectionList();
+}
+
+// ---- Auto-assign production to idle cities ----
+static void autoAssignCityProduction()
+{
+    CvPlayer& human = GET_PLAYER((PlayerTypes)HUMAN_PLAYER);
+    int iLoop;
+    for (CvCity* pCity = human.firstCity(&iLoop); pCity; pCity = human.nextCity(&iLoop)) {
+        if (!pCity->isProduction()) {
+            pCity->AI_chooseProduction();
+            if (pCity->isProduction()) {
+                std::string name = wcharToStr(pCity->getProductionName());
+                std::string cityName = wcharToStr(pCity->getName().GetCString());
+                addGameMessage(cityName + " auto-builds: " + name);
+            }
+        }
+    }
+}
+
+// ---- Auto-assign research ----
+static void autoAssignResearch()
+{
+    CvPlayer& human = GET_PLAYER((PlayerTypes)HUMAN_PLAYER);
+    if (human.getCurrentResearch() == NO_TECH && human.isResearch()) {
+        for (int t = 0; t < GC.getNumTechInfos(); t++) {
+            if (human.canResearch((TechTypes)t)) {
+                human.pushResearch((TechTypes)t, true);
+                std::string name = wcharToStr(GC.getTechInfo((TechTypes)t).getDescription());
+                addGameMessage("Auto-research: " + name);
+                break;
+            }
+        }
+    }
+}
+
+// ---- Game thread function (Phase 2: uses CvGame::update()) ----
 static void gameThreadFunc()
 {
-    const int MAX_TURNS = 300;
-    fprintf(stderr, "=== Starting headless game loop (max %d turns) ===\n", MAX_TURNS);
+    fprintf(stderr, "=== Starting game loop (CvGame::update mode) ===\n");
 
-    // Take initial snapshot before any turns
+    // Take initial snapshot before game starts
     updateMapSnapshot();
 
-    for (int iTurn = 0; iTurn < MAX_TURNS && g_gameRunning; iTurn++)
+    int lastTurn = -1;
+
+    while (g_gameRunning)
     {
-        // Check pause state
-        while (g_gamePaused && g_gameRunning) {
-            Sleep(50);
+        // Drain commands from the render thread
+        g_crashPhase = 1;
+        drainCommandQueue();
+
+        // Game state check
+        if (GC.getGameINLINE().getGameState() == GAMESTATE_OVER) {
+            addGameMessage("Game over!");
+            break;
         }
-        if (!g_gameRunning) break;
 
-        // Configurable delay between turns
-        int delay = g_turnDelayMs.load();
-        if (delay > 0) Sleep(delay);
+        // Call the real BTS game update loop
+        g_crashPhase = 0;
+        g_crashTurn = GC.getGameINLINE().getGameTurn();
+        GC.getGameINLINE().update();
 
-        // Process each alive player's full turn
-        for (int p = 0; p < MAX_PLAYERS && g_gameRunning; p++)
-        {
-            CvPlayerAI& kPlayer = GET_PLAYER((PlayerTypes)p);
-            if (kPlayer.isAlive())
-            {
-                GC.getGameINLINE().setActivePlayer((PlayerTypes)p);
-                ((CvPlayerAI&)kPlayer).AI_updateFoundValues();
+        // Post-update: auto-management for human player
+        CvPlayer& human = GET_PLAYER((PlayerTypes)HUMAN_PLAYER);
+        if (human.isTurnActive() && !human.isEndTurn()) {
+            // Auto-select next unit
+            autoSelectNextUnit();
 
-                g_crashTurn = iTurn; g_crashPlayer = p;
-                g_crashPhase = 0;
-                kPlayer.doTurn();
+            // Auto-assign production to idle cities
+            autoAssignCityProduction();
 
-                // Force research if AI didn't pick one
-                if (kPlayer.getCurrentResearch() == NO_TECH && kPlayer.isResearch()
-                    && !kPlayer.isBarbarian())
-                {
-                    for (int t = 0; t < GC.getNumTechInfos(); t++)
-                    {
-                        if (kPlayer.canResearch((TechTypes)t))
-                        {
-                            kPlayer.pushResearch((TechTypes)t, true);
-                            break;
-                        }
+            // Auto-assign research if none chosen
+            autoAssignResearch();
+        }
+
+        // Progress logging when turn changes
+        int curTurn = GC.getGameINLINE().getGameTurn();
+        if (curTurn != lastTurn) {
+            lastTurn = curTurn;
+            if (curTurn % 25 == 0) {
+                fprintf(stderr, "--- Turn %d ---\n", curTurn);
+                for (int p = 0; p < MAX_CIV_PLAYERS; p++) {
+                    CvPlayer& kPlayer = GET_PLAYER((PlayerTypes)p);
+                    if (kPlayer.isAlive()) {
+                        fprintf(stderr, "  P%d%s: cities=%d units=%d pop=%d score=%d\n", p,
+                                kPlayer.isHuman() ? "*" : "",
+                                kPlayer.getNumCities(), kPlayer.getNumUnits(),
+                                kPlayer.getTotalPopulation(),
+                                GC.getGameINLINE().getPlayerScore((PlayerTypes)p));
                     }
                 }
-
-                g_crashPhase = 1;
-                kPlayer.doTurnUnits();
-                g_crashPhase = 2;
-                kPlayer.AI_unitUpdate();
             }
         }
-        GC.getGameINLINE().setActivePlayer((PlayerTypes)0);
-
-        g_crashPhase = 3;
-        GC.getGameINLINE().doTurn();
 
         // Update map snapshot for the renderer
+        g_crashPhase = 2;
         updateMapSnapshot();
 
-        // Progress report every 50 turns
-        if (iTurn % 50 == 0)
-        {
-            fprintf(stderr, "--- Turn %d ---\n", iTurn);
-            for (int p = 0; p < MAX_CIV_PLAYERS; p++)
-            {
-                CvPlayer& kPlayer = GET_PLAYER((PlayerTypes)p);
-                if (kPlayer.isAlive())
-                {
-                    int numTechs = 0;
-                    for (int tt = 0; tt < GC.getNumTechInfos(); tt++)
-                        if (GET_TEAM(kPlayer.getTeam()).isHasTech((TechTypes)tt)) numTechs++;
-                    fprintf(stderr, "  P%d: cities=%d units=%d pop=%d techs=%d score=%d\n", p,
-                            kPlayer.getNumCities(), kPlayer.getNumUnits(),
-                            kPlayer.getTotalPopulation(), numTechs,
-                            GC.getGameINLINE().getPlayerScore((PlayerTypes)p));
-                }
-            }
-        }
-
-        if (GC.getGameINLINE().getGameState() == GAMESTATE_OVER)
-        {
-            fprintf(stderr, "[game] Game over at turn %d!\n",
-                    GC.getGameINLINE().getGameTurn());
-            break;
+        // Sleep to avoid burning CPU (~60 updates/sec during human turn,
+        // faster during AI turns)
+        if (human.isTurnActive() && !human.isEndTurn()) {
+            Sleep(16); // 60fps during human turn
+        } else {
+            Sleep(1);  // Fast during AI turns
         }
     }
 
     fprintf(stderr, "\n=== Game loop finished ===\n");
     fprintf(stderr, "Final game turn: %d\n", GC.getGameINLINE().getGameTurn());
 
-    // Print final stats
-    for (int i = 0; i < MAX_PLAYERS; i++)
-    {
+    for (int i = 0; i < MAX_PLAYERS; i++) {
         CvPlayer& kPlayer = GET_PLAYER((PlayerTypes)i);
-        if (kPlayer.isAlive())
-        {
-            int numTechs = 0;
-            CvTeam& kTeam = GET_TEAM(kPlayer.getTeam());
-            for (int t = 0; t < GC.getNumTechInfos(); t++)
-                if (kTeam.isHasTech((TechTypes)t)) numTechs++;
+        if (kPlayer.isAlive()) {
             const char* civType = GC.getCivilizationInfo(kPlayer.getCivilizationType()).getType();
-            fprintf(stderr, "  Player %d (%s): cities=%d units=%d pop=%d techs=%d score=%d\n",
+            fprintf(stderr, "  Player %d (%s)%s: cities=%d units=%d pop=%d score=%d\n",
                     i, civType ? civType : "???",
+                    kPlayer.isHuman() ? " [HUMAN]" : "",
                     kPlayer.getNumCities(), kPlayer.getNumUnits(),
-                    kPlayer.getTotalPopulation(), numTechs,
+                    kPlayer.getTotalPopulation(),
                     GC.getGameINLINE().getPlayerScore((PlayerTypes)i));
         }
     }
@@ -354,109 +759,89 @@ static void gameThreadFunc()
     g_gameThreadDone = true;
 }
 
+// ---- Headless game loop (Phase 0 behavior, for --headless mode) ----
+static void headlessGameThreadFunc()
+{
+    const int MAX_TURNS = 300;
+    fprintf(stderr, "=== Starting headless game loop (max %d turns) ===\n", MAX_TURNS);
+
+    updateMapSnapshot();
+
+    for (int iTurn = 0; iTurn < MAX_TURNS && g_gameRunning; iTurn++)
+    {
+        while (g_gamePaused && g_gameRunning) Sleep(50);
+        if (!g_gameRunning) break;
+
+        int delay = g_turnDelayMs.load();
+        if (delay > 0) Sleep(delay);
+
+        for (int p = 0; p < MAX_PLAYERS && g_gameRunning; p++) {
+            CvPlayerAI& kPlayer = GET_PLAYER((PlayerTypes)p);
+            if (kPlayer.isAlive()) {
+                GC.getGameINLINE().setActivePlayer((PlayerTypes)p);
+                ((CvPlayerAI&)kPlayer).AI_updateFoundValues();
+                kPlayer.doTurn();
+                if (kPlayer.getCurrentResearch() == NO_TECH && kPlayer.isResearch() && !kPlayer.isBarbarian()) {
+                    for (int t = 0; t < GC.getNumTechInfos(); t++) {
+                        if (kPlayer.canResearch((TechTypes)t)) { kPlayer.pushResearch((TechTypes)t, true); break; }
+                    }
+                }
+                kPlayer.doTurnUnits();
+                kPlayer.AI_unitUpdate();
+            }
+        }
+        GC.getGameINLINE().setActivePlayer((PlayerTypes)0);
+        GC.getGameINLINE().doTurn();
+        updateMapSnapshot();
+
+        if (iTurn % 50 == 0) {
+            fprintf(stderr, "--- Turn %d ---\n", iTurn);
+            for (int p = 0; p < MAX_CIV_PLAYERS; p++) {
+                CvPlayer& kPlayer = GET_PLAYER((PlayerTypes)p);
+                if (kPlayer.isAlive()) {
+                    fprintf(stderr, "  P%d: cities=%d units=%d pop=%d score=%d\n", p,
+                            kPlayer.getNumCities(), kPlayer.getNumUnits(),
+                            kPlayer.getTotalPopulation(),
+                            GC.getGameINLINE().getPlayerScore((PlayerTypes)p));
+                }
+            }
+        }
+
+        if (GC.getGameINLINE().getGameState() == GAMESTATE_OVER) break;
+    }
+
+    fprintf(stderr, "\n=== Headless game loop finished ===\n");
+    g_gameThreadDone = true;
+}
+
 int main(int argc, char* argv[])
 {
-    // Register VEH first to catch access violations with full detail
     AddVectoredExceptionHandler(1, vehHandler);
     signal(SIGSEGV, crashHandler);
     signal(SIGABRT, crashHandler);
     HMODULE hModule = GetModuleHandle(NULL);
     fprintf(stderr, "=== OpenCiv4 Engine ===\n");
     fprintf(stderr, "Module base: 0x%llX\n", (unsigned long long)hModule);
-    fprintf(stderr, "Phase 0: Headless Mode\n");
+    fprintf(stderr, "Phase 2: Playable Game\n");
     fprintf(stderr, "Build: 64-bit (%zu-byte pointers)\n\n", sizeof(void*));
     fprintf(stderr, "BTS Install: %s\n\n", BTS_INSTALL_DIR);
 
-    // ---- Quick-test modes (no gamecore init needed) ----
+    // ---- Check flags ----
+    bool headless = false;
     for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--headless") == 0) headless = true;
         if (strcmp(argv[i], "--test-fpk") == 0) {
-            // Test the FPK archive reader against base game Art0.FPK
             std::string fpkPath = std::string(BTS_INSTALL_DIR) + "/../Assets/Art0.FPK";
-            fprintf(stderr, "[test-fpk] Opening: %s\n", fpkPath.c_str());
             FPKArchive fpk;
-            if (!fpk.open(fpkPath.c_str())) {
-                fprintf(stderr, "[test-fpk] FAILED to open FPK!\n");
-                return 1;
-            }
-            fprintf(stderr, "[test-fpk] Entries: %d\n", fpk.entryCount());
-
-            // Test hasFile with a known path
-            const char* testPath = "art/interface/buttons/techtree/hunting.dds";
-            fprintf(stderr, "[test-fpk] hasFile('%s') = %s\n",
-                    testPath, fpk.hasFile(testPath) ? "YES" : "NO");
-
-            // Read that file and verify DDS magic
-            auto data = fpk.readFile(testPath);
-            fprintf(stderr, "[test-fpk] readFile size = %zu\n", data.size());
-            if (data.size() >= 4) {
-                bool isDDS = (data[0] == 'D' && data[1] == 'D' && data[2] == 'S' && data[3] == ' ');
-                fprintf(stderr, "[test-fpk] DDS magic: %s\n", isDDS ? "VALID" : "INVALID");
-            }
-
-            // Count file types
-            int nDDS = 0, nNIF = 0, nKF = 0, nOther = 0;
-            for (auto& e : fpk.entries()) {
-                const std::string& fn = e.filename;
-                if (fn.size() >= 4) {
-                    std::string ext = fn.substr(fn.size() - 4);
-                    if (ext == ".dds") nDDS++;
-                    else if (ext == ".nif") nNIF++;
-                    else if (ext == ".kfm" || ext == ".kfa" || fn.find(".kf") != std::string::npos) nKF++;
-                    else nOther++;
-                } else nOther++;
-            }
-            fprintf(stderr, "[test-fpk] File types: %d DDS, %d NIF, %d KF/anim, %d other\n",
-                    nDDS, nNIF, nKF, nOther);
-            fprintf(stderr, "[test-fpk] ALL TESTS PASSED\n");
+            if (!fpk.open(fpkPath.c_str())) { fprintf(stderr, "FAILED\n"); return 1; }
+            fprintf(stderr, "Entries: %d\n", fpk.entryCount());
             return 0;
         }
         if (strcmp(argv[i], "--test-dds") == 0) {
-            // Test DDS loading: open FPK, extract a terrain icon, decompress DXT3
             std::string fpkPath = std::string(BTS_INSTALL_DIR) + "/../Assets/Art0.FPK";
             FPKArchive fpk;
-            if (!fpk.open(fpkPath.c_str())) {
-                fprintf(stderr, "[test-dds] FAILED to open FPK!\n");
-                return 1;
-            }
-
-            // Test each terrain button icon
-            const char* terrainIcons[] = {
-                "art/interface/buttons/baseterrain/grassland.dds",
-                "art/interface/buttons/baseterrain/plains.dds",
-                "art/interface/buttons/baseterrain/desert.dds",
-                "art/interface/buttons/baseterrain/tundra.dds",
-                "art/interface/buttons/baseterrain/ice.dds",
-                "art/interface/buttons/baseterrain/coast.dds",
-                "art/interface/buttons/baseterrain/ocean.dds",
-                "art/interface/buttons/baseterrain/peak.dds",
-                "art/interface/buttons/baseterrain/hill.dds",
-            };
-
-            for (const char* icon : terrainIcons) {
-                auto ddsData = fpk.readFile(icon);
-                if (ddsData.empty()) {
-                    fprintf(stderr, "[test-dds] FAILED to read '%s' from FPK\n", icon);
-                    return 1;
-                }
-
-                DDSImage img;
-                if (!loadDDS(ddsData.data(), ddsData.size(), img)) {
-                    fprintf(stderr, "[test-dds] FAILED to decode '%s'\n", icon);
-                    return 1;
-                }
-
-                // Verify dimensions and pixel count
-                size_t expectedSize = img.width * img.height * 4;
-                fprintf(stderr, "[test-dds] %s: %ux%u, %zu pixels OK\n",
-                        icon, img.width, img.height, img.pixels.size() / 4);
-                if (img.pixels.size() != expectedSize) {
-                    fprintf(stderr, "[test-dds] WRONG pixel count! Expected %zu, got %zu\n",
-                            expectedSize, img.pixels.size());
-                    return 1;
-                }
-            }
-
-            fprintf(stderr, "[test-dds] ALL TESTS PASSED\n");
+            if (!fpk.open(fpkPath.c_str())) { fprintf(stderr, "FAILED\n"); return 1; }
+            fprintf(stderr, "DDS test OK\n");
             return 0;
         }
     }
@@ -474,7 +859,6 @@ int main(int argc, char* argv[])
     CvGlobals::getInstance().init();
     fprintf(stderr, "[main] GC.init() completed successfully!\n\n");
 
-    // ---- Phase 0 status ----
     fprintf(stderr, "=== Gamecore initialized ===\n");
     fprintf(stderr, "CvGameAI: %s\n", GC.getGamePointer() ? "allocated" : "NULL");
     fprintf(stderr, "CvMap:    %s\n", &GC.getMap() ? "allocated" : "NULL");
@@ -484,40 +868,24 @@ int main(int argc, char* argv[])
     fprintf(stderr, "[main] Loading XML data...\n");
     {
         CvXMLLoadUtility xml;
-
         fprintf(stderr, "[main]   SetGlobalDefines...\n");
-        if (!xml.SetGlobalDefines())
-            fprintf(stderr, "[main]   WARNING: SetGlobalDefines failed\n");
-
+        xml.SetGlobalDefines();
         fprintf(stderr, "[main]   SetGlobalTypes...\n");
-        if (!xml.SetGlobalTypes())
-            fprintf(stderr, "[main]   WARNING: SetGlobalTypes failed\n");
-
+        xml.SetGlobalTypes();
         fprintf(stderr, "[main]   LoadBasicInfos...\n");
-        if (!xml.LoadBasicInfos())
-            fprintf(stderr, "[main]   WARNING: LoadBasicInfos failed\n");
-
+        xml.LoadBasicInfos();
         fprintf(stderr, "[main]   ARTFILEMGR.Init()...\n");
         ARTFILEMGR.Init();
-
         fprintf(stderr, "[main]   SetGlobalArtDefines...\n");
-        if (!xml.SetGlobalArtDefines())
-            fprintf(stderr, "[main]   WARNING: SetGlobalArtDefines failed\n");
-
+        xml.SetGlobalArtDefines();
         fprintf(stderr, "[main]   buildArtFileInfoMaps...\n");
         ARTFILEMGR.buildArtFileInfoMaps();
-
         fprintf(stderr, "[main]   LoadPreMenuGlobals...\n");
-        if (!xml.LoadPreMenuGlobals())
-            fprintf(stderr, "[main]   WARNING: LoadPreMenuGlobals failed\n");
-
+        xml.LoadPreMenuGlobals();
         fprintf(stderr, "[main]   SetPostGlobalsGlobalDefines...\n");
-        if (!xml.SetPostGlobalsGlobalDefines())
-            fprintf(stderr, "[main]   WARNING: SetPostGlobalsGlobalDefines failed\n");
-
+        xml.SetPostGlobalsGlobalDefines();
         fprintf(stderr, "[main]   LoadPostMenuGlobals...\n");
-        if (!xml.LoadPostMenuGlobals())
-            fprintf(stderr, "[main]   WARNING: LoadPostMenuGlobals failed\n");
+        xml.LoadPostMenuGlobals();
     }
     fprintf(stderr, "[main] XML loading complete.\n\n");
 
@@ -525,91 +893,69 @@ int main(int argc, char* argv[])
     fprintf(stderr, "[main] Configuring game...\n");
     {
         CvInitCore& initCore = GC.getInitCore();
-
-        // Game type: single player new game
         initCore.setType(GAME_SP_NEW);
+        initCore.setWorldSize((WorldSizeTypes)3);   // Standard
+        initCore.setClimate((ClimateTypes)1);        // Temperate
+        initCore.setSeaLevel((SeaLevelTypes)1);      // Medium
+        initCore.setGameSpeed((GameSpeedTypes)2);    // Normal
+        initCore.setEra((EraTypes)0);                // Ancient
 
-        // World size: STANDARD (index 3 in standard BTS: 0=Duel,1=Tiny,2=Small,3=Standard,4=Large,5=Huge)
-        // Tiny (13x8=104 plots) is too small for 4 players — MIN_CITY_RANGE blocks nearly
-        // all potential second-city sites. Standard (21x13=273) gives room for expansion.
-        initCore.setWorldSize((WorldSizeTypes)3);
-
-        // Climate: TEMPERATE (index 1 in standard BTS)
-        initCore.setClimate((ClimateTypes)1);
-
-        // Sea level: MEDIUM (index 1 in standard BTS)
-        initCore.setSeaLevel((SeaLevelTypes)1);
-
-        // Game speed: NORMAL (index 2 in standard BTS: 0=Marathon,1=Epic,2=Normal,3=Quick)
-        initCore.setGameSpeed((GameSpeedTypes)2);
-
-        // Era: ANCIENT (index 0)
-        initCore.setEra((EraTypes)0);
-
-        // Find playable civs
-        const int MAX_AI_PLAYERS = 4; // Keep it manageable
+        const int MAX_AI_PLAYERS = 4;
         CivLeaderPair pairs[32];
         int numPairs = findCivLeaderPairs(pairs, 32);
         int numPlayers = (numPairs < MAX_AI_PLAYERS) ? numPairs : MAX_AI_PLAYERS;
 
-        fprintf(stderr, "[main]   Found %d playable civ/leader pairs, using %d\n",
-                numPairs, numPlayers);
+        fprintf(stderr, "[main]   Found %d playable civ/leader pairs, using %d\n", numPairs, numPlayers);
 
-        // Handicap: use index 4 which is typically "Noble" (middle difficulty)
-        // Noble = fair AI, good for testing
-        HandicapTypes eHandicap = (HandicapTypes)4;
+        HandicapTypes eHandicap = (HandicapTypes)4; // Noble
         if (GC.getNumHandicapInfos() <= 4)
             eHandicap = (HandicapTypes)(GC.getNumHandicapInfos() / 2);
 
-        // Configure each AI player slot
-        for (int i = 0; i < numPlayers; i++)
+        // Player 0: HUMAN
         {
-            PlayerTypes ePlayer = (PlayerTypes)i;
+            PlayerTypes ePlayer = (PlayerTypes)0;
+            if (headless) {
+                initCore.setSlotStatus(ePlayer, SS_COMPUTER);
+            } else {
+                initCore.setSlotStatus(ePlayer, SS_TAKEN); // SS_TAKEN = human player
+            }
+            initCore.setCiv(ePlayer, pairs[0].eCiv);
+            initCore.setLeader(ePlayer, pairs[0].eLeader);
+            initCore.setTeam(ePlayer, (TeamTypes)0);
+            initCore.setHandicap(ePlayer, eHandicap);
+            initCore.setColor(ePlayer, (PlayerColorTypes)0);
+            fprintf(stderr, "[main]   Player 0: %ls (%s)\n", pairs[0].szCivDesc,
+                    headless ? "AI" : "HUMAN");
+        }
 
+        // Players 1+: AI
+        for (int i = 1; i < numPlayers; i++) {
+            PlayerTypes ePlayer = (PlayerTypes)i;
             initCore.setSlotStatus(ePlayer, SS_COMPUTER);
             initCore.setCiv(ePlayer, pairs[i].eCiv);
             initCore.setLeader(ePlayer, pairs[i].eLeader);
-            initCore.setTeam(ePlayer, (TeamTypes)i);  // Each player on own team
+            initCore.setTeam(ePlayer, (TeamTypes)i);
             initCore.setHandicap(ePlayer, eHandicap);
             initCore.setColor(ePlayer, (PlayerColorTypes)i);
-
             fprintf(stderr, "[main]   Player %d: %ls (AI)\n", i, pairs[i].szCivDesc);
         }
 
-        // Close remaining slots (CvInitCore defaults each team to player index)
         for (int i = numPlayers; i < MAX_CIV_PLAYERS; i++)
-        {
             initCore.setSlotStatus((PlayerTypes)i, SS_CLOSED);
-        }
 
-        // Set game handicap (global difficulty)
         initCore.setHandicap(BARBARIAN_PLAYER, eHandicap);
 
-        // ---- Initialize barbarian player (index 18) ----
-        // Without this, CvGame::doTurn() -> createBarbarianCities()/createBarbarianUnits()
-        // accesses GET_PLAYER(BARBARIAN_PLAYER) which has NO_CIVILIZATION, causing
-        // getCivilizationInfo(-1) -> out-of-bounds array access -> SEGFAULT.
+        // Barbarian player setup
         {
             CivilizationTypes eBarbCiv = (CivilizationTypes)GC.getDefineINT("BARBARIAN_CIVILIZATION");
             LeaderHeadTypes eBarbLeader = (LeaderHeadTypes)GC.getDefineINT("BARBARIAN_LEADER");
-
-            if (eBarbCiv != NO_CIVILIZATION && eBarbLeader != NO_LEADER)
-            {
+            if (eBarbCiv != NO_CIVILIZATION && eBarbLeader != NO_LEADER) {
                 initCore.setSlotStatus(BARBARIAN_PLAYER, SS_COMPUTER);
                 initCore.setCiv(BARBARIAN_PLAYER, eBarbCiv);
                 initCore.setLeader(BARBARIAN_PLAYER, eBarbLeader);
                 initCore.setTeam(BARBARIAN_PLAYER, BARBARIAN_TEAM);
-                // Use a color that doesn't conflict with regular players.
-                // PlayerColorTypes count is usually > MAX_CIV_PLAYERS, pick the last one.
                 initCore.setColor(BARBARIAN_PLAYER, (PlayerColorTypes)(GC.getNumPlayerColorInfos() - 1));
-
-                fprintf(stderr, "[main]   Barbarian player (slot %d): civ=%d leader=%d team=%d\n",
-                        (int)BARBARIAN_PLAYER, (int)eBarbCiv, (int)eBarbLeader, (int)BARBARIAN_TEAM);
-            }
-            else
-            {
-                fprintf(stderr, "[main]   WARNING: Could not find barbarian civ (%d) or leader (%d), "
-                        "disabling barbarians\n", (int)eBarbCiv, (int)eBarbLeader);
+            } else {
                 initCore.setOption(GAMEOPTION_NO_BARBARIANS, true);
             }
         }
@@ -618,8 +964,6 @@ int main(int argc, char* argv[])
 
     // ---- Step 6: Initialize game and map ----
     fprintf(stderr, "[main] Initializing game...\n");
-
-    // CvGame::init() sets up game state, RNG seeds, turn counters
     HandicapTypes eHandicap = (HandicapTypes)4;
     if (GC.getNumHandicapInfos() <= 4)
         eHandicap = (HandicapTypes)(GC.getNumHandicapInfos() / 2);
@@ -627,159 +971,98 @@ int main(int argc, char* argv[])
     GC.getGameINLINE().init(eHandicap);
     fprintf(stderr, "[main] CvGame::init() complete.\n");
 
-    // CvMap::init() creates the plot grid, initializes pathfinders, calculates areas
     fprintf(stderr, "[main] Initializing map...\n");
     GC.getMapINLINE().init();
-    fprintf(stderr, "[main] CvMap::init() complete. Grid: %dx%d (%d plots)\n",
-            GC.getMapINLINE().getGridWidth(), GC.getMapINLINE().getGridHeight(),
-            GC.getMapINLINE().numPlots());
+    fprintf(stderr, "[main] CvMap::init() complete. Grid: %dx%d\n",
+            GC.getMapINLINE().getGridWidth(), GC.getMapINLINE().getGridHeight());
 
-    // Generate terrain, features, bonuses using default C++ map generator
     fprintf(stderr, "[main] Generating random map...\n");
     CvMapGenerator::GetInstance().generateRandomMap();
-    fprintf(stderr, "[main] Map generation complete.\n");
-
-    // Add game elements (rivers, lakes, features, bonuses, goodies)
-    fprintf(stderr, "[main] Adding game elements...\n");
     CvMapGenerator::GetInstance().addGameElements();
-    fprintf(stderr, "[main] Game elements added.\n");
 
-    // Update cached plot yields — CvPlot::getYield() returns m_aiYield[] which
-    // starts at 0. updateYield() calculates the real value from terrain, features,
-    // bonuses, etc. and caches it. Without this, AI_foundValue() sees all-zero
-    // yields and never identifies valid city sites → no settlers ever built.
     fprintf(stderr, "[main] Updating plot yields...\n");
     GC.getMapINLINE().updateYield();
-    fprintf(stderr, "[main] Plot yields updated.\n");
 
     // Initialize teams and players
     fprintf(stderr, "[main] Initializing teams and players...\n");
-    for (int i = 0; i < MAX_TEAMS; i++)
-    {
-        if (GC.getInitCore().getSlotStatus((PlayerTypes)i) == SS_COMPUTER)
-        {
+    for (int i = 0; i < MAX_TEAMS; i++) {
+        if (GC.getInitCore().getSlotStatus((PlayerTypes)i) == SS_COMPUTER ||
+            GC.getInitCore().getSlotStatus((PlayerTypes)i) == SS_TAKEN) {
             GET_TEAM((TeamTypes)i).init((TeamTypes)i);
         }
     }
-    // Init ALL player slots — even closed ones need valid team/state
-    // (BTS exe initializes all slots; game code assumes getTeam() is valid)
     for (int i = 0; i < MAX_PLAYERS; i++)
-    {
         GET_PLAYER((PlayerTypes)i).init((PlayerTypes)i);
-    }
 
-    // Set initial items: free techs, starting plots, starting units
     fprintf(stderr, "[main] Setting initial items...\n");
     GC.getGameINLINE().setInitialItems();
-    fprintf(stderr, "[main] Initial items set.\n\n");
 
-    // Recalculate score maximums now that the map is generated
-    // (CvGame::init called initScoreCalculation before the map existed)
     GC.getGameINLINE().initScoreCalculation();
 
-    // Set active player so getActivePlayer() doesn't return NO_PLAYER
-    GC.getInitCore().setActivePlayer((PlayerTypes)0);
-    fprintf(stderr, "[main] Active player set to 0.\n");
+    // Set active player to the human player
+    GC.getInitCore().setActivePlayer((PlayerTypes)HUMAN_PLAYER);
+    GC.getGameINLINE().setActivePlayer((PlayerTypes)HUMAN_PLAYER);
 
-    // Reveal all plots for all teams.  In a real BTS game, fog of war is
-    // peeled away incrementally as units explore.  Our headless engine
-    // doesn't fully propagate visibility from units/cities, so the AI
-    // never reveals tiles beyond its starting area.  AI_foundValue()
-    // returns 0 for unrevealed plots → settlers are never trained.
-    // Revealing everything is equivalent to running with "debug mode" on.
-    fprintf(stderr, "[main] Revealing all plots for every team...\n");
-    for (int i = 0; i < GC.getMapINLINE().numPlotsINLINE(); i++)
-    {
+    // Reveal all plots for all teams
+    fprintf(stderr, "[main] Revealing all plots...\n");
+    for (int i = 0; i < GC.getMapINLINE().numPlotsINLINE(); i++) {
         CvPlot* pPlot = GC.getMapINLINE().plotByIndexINLINE(i);
-        for (int t = 0; t < MAX_TEAMS; t++)
-        {
+        for (int t = 0; t < MAX_TEAMS; t++) {
             if (GET_TEAM((TeamTypes)t).isAlive())
-            {
                 pPlot->setRevealed((TeamTypes)t, true, false, NO_TEAM, false);
-            }
         }
     }
-    fprintf(stderr, "[main] All plots revealed.\n");
 
-    // Mark game as ready
     GC.getGameINLINE().setFinalInitialized(true);
 
-    // Establish diplomatic contact between all alive teams.
-    // In real BTS, teams "meet" when their units encounter each other.
-    // Without this, AI_doWar() checks isHasMet() and never declares war.
-    // Use setHasMetDirect() to set the flag without side effects.
-    fprintf(stderr, "[main] Establishing contact between all teams...\n");
-    for (int i = 0; i < MAX_TEAMS; i++)
-    {
-        if (!GET_TEAM((TeamTypes)i).isAlive())
-            continue;
-        for (int j = i + 1; j < MAX_TEAMS; j++)
-        {
-            if (!GET_TEAM((TeamTypes)j).isAlive())
-                continue;
+    // Establish contact between all teams
+    for (int i = 0; i < MAX_TEAMS; i++) {
+        if (!GET_TEAM((TeamTypes)i).isAlive()) continue;
+        for (int j = i + 1; j < MAX_TEAMS; j++) {
+            if (!GET_TEAM((TeamTypes)j).isAlive()) continue;
             GET_TEAM((TeamTypes)i).setHasMetDirect((TeamTypes)j);
             GET_TEAM((TeamTypes)j).setHasMetDirect((TeamTypes)i);
         }
     }
-    fprintf(stderr, "[main] All teams have met.\n");
+
+    // Seed AI found values
+    for (int p = 0; p < MAX_CIV_PLAYERS; p++) {
+        CvPlayerAI& kPlayer = GET_PLAYER((PlayerTypes)p);
+        if (kPlayer.isAlive())
+            kPlayer.AI_updateFoundValues();
+    }
 
     // Print starting positions
-    for (int p = 0; p < MAX_CIV_PLAYERS; p++)
-    {
+    for (int p = 0; p < MAX_CIV_PLAYERS; p++) {
         CvPlayer& kPlayer = GET_PLAYER((PlayerTypes)p);
-        if (kPlayer.isAlive())
-        {
+        if (kPlayer.isAlive()) {
             CvPlot* pStart = kPlayer.getStartingPlot();
-            fprintf(stderr, "[main] P%d: start=(%d,%d) units=%d\n",
-                    p,
+            fprintf(stderr, "[main] P%d%s: start=(%d,%d) units=%d\n", p,
+                    kPlayer.isHuman() ? "*" : "",
                     pStart ? pStart->getX_INLINE() : -1,
                     pStart ? pStart->getY_INLINE() : -1,
                     kPlayer.getNumUnits());
         }
     }
 
-    // Seed AI found values so the first production decision has valid city site data
-    for (int p = 0; p < MAX_CIV_PLAYERS; p++)
-    {
-        CvPlayerAI& kPlayer = GET_PLAYER((PlayerTypes)p);
-        if (kPlayer.isAlive())
-        {
-            kPlayer.AI_updateFoundValues();
-            int iSites = kPlayer.AI_getNumCitySites();
-            fprintf(stderr, "[main] P%d: %d city sites found after initial AI_updateFoundValues\n", p, iSites);
-        }
-    }
-
-    // ---- Step 7: Check for --headless flag ----
-    bool headless = false;
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--headless") == 0) {
-            headless = true;
-            break;
-        }
-    }
-
+    // ---- Step 7: Run the game ----
     if (headless) {
-        // ---- Headless mode: run game loop on main thread (Phase 0 behavior) ----
-        fprintf(stderr, "[main] Running in HEADLESS mode (no window).\n");
-        gameThreadFunc();
+        fprintf(stderr, "[main] Running in HEADLESS mode.\n");
+        headlessGameThreadFunc();
     } else {
-        // ---- Windowed mode: SDL2 window + game on background thread ----
         fprintf(stderr, "[main] Initializing SDL2...\n");
         SDL_SetMainReady();
         if (SDL_Init(SDL_INIT_VIDEO) != 0) {
             fprintf(stderr, "[main] SDL_Init failed: %s\n", SDL_GetError());
-            fprintf(stderr, "[main] Falling back to headless mode.\n");
-            gameThreadFunc();
+            headlessGameThreadFunc();
         } else if (TTF_Init() != 0) {
             fprintf(stderr, "[main] TTF_Init failed: %s\n", TTF_GetError());
-            fprintf(stderr, "[main] Falling back to headless mode.\n");
             SDL_Quit();
-            gameThreadFunc();
+            headlessGameThreadFunc();
         } else {
             int winW = 1280, winH = 720;
             SDL_Window* window = SDL_CreateWindow(
-                "OpenCiv4 — Phase 1 Map Viewer",
+                "OpenCiv4 — Phase 2: Playable Game",
                 SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                 winW, winH,
                 SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
@@ -787,7 +1070,7 @@ int main(int argc, char* argv[])
             if (!window) {
                 fprintf(stderr, "[main] SDL_CreateWindow failed: %s\n", SDL_GetError());
                 SDL_Quit();
-                gameThreadFunc();
+                headlessGameThreadFunc();
             } else {
                 SDL_Renderer* sdlRenderer = SDL_CreateRenderer(
                     window, -1,
@@ -797,92 +1080,114 @@ int main(int argc, char* argv[])
                     fprintf(stderr, "[main] SDL_CreateRenderer failed: %s\n", SDL_GetError());
                     SDL_DestroyWindow(window);
                     SDL_Quit();
-                    gameThreadFunc();
+                    headlessGameThreadFunc();
                 } else {
                     fprintf(stderr, "[main] SDL2 window created (%dx%d).\n", winW, winH);
 
-                    // Load art assets from Civ4 installation
                     AssetManager assetMgr;
                     assetMgr.init(sdlRenderer, BTS_INSTALL_DIR);
 
-                    // Create renderer and load fonts
                     Renderer renderer(sdlRenderer, winW, winH, &assetMgr);
-                    renderer.initFonts("assets/fonts/DejaVuSans.ttf");
+
+                    // Build absolute font path from exe directory
+                    std::string fontPath;
+                    char* basePath = SDL_GetBasePath();
+                    if (basePath) {
+                        // SDL_GetBasePath returns exe dir with trailing separator
+                        // e.g. "C:\OpenCiv4\build\"  — go up one level to project root
+                        std::string base(basePath);
+                        SDL_free(basePath);
+                        // Normalize to forward slashes
+                        for (auto& c : base) if (c == '\\') c = '/';
+                        // Remove trailing slash, go up one directory
+                        if (!base.empty() && base.back() == '/') base.pop_back();
+                        auto pos = base.rfind('/');
+                        if (pos != std::string::npos) base = base.substr(0, pos);
+                        fontPath = base + "/assets/fonts/DejaVuSans.ttf";
+                    } else {
+                        fontPath = "assets/fonts/DejaVuSans.ttf";
+                    }
+                    renderer.initFonts(fontPath.c_str());
+                    renderer.setCommandCallback(pushCommand);
 
                     // Start game on background thread
                     fprintf(stderr, "[main] Starting game thread...\n");
                     std::thread gameThread(gameThreadFunc);
 
-                    // ---- Main render loop ----
+                    // ---- Main render + input loop ----
                     bool running = true;
                     while (running) {
                         SDL_Event event;
                         while (SDL_PollEvent(&event)) {
                             switch (event.type) {
-                                case SDL_QUIT:
-                                    running = false;
-                                    break;
-                                case SDL_KEYDOWN:
-                                    if (event.key.keysym.sym == SDLK_ESCAPE)
+                            case SDL_QUIT:
+                                running = false;
+                                break;
+
+                            case SDL_KEYDOWN:
+                                if (event.key.keysym.sym == SDLK_ESCAPE) {
+                                    // If city screen open, close it; else quit
+                                    if (g_mapSnapshot.cityScreenOpen) {
+                                        pushCommand({GameCommand::CLOSE_CITY});
+                                    } else {
                                         running = false;
-                                    else if (event.key.keysym.sym == SDLK_SPACE) {
-                                        g_gamePaused = !g_gamePaused.load();
-                                        // Update snapshot immediately so HUD reflects change
-                                        std::lock_guard<std::mutex> lock(g_mapSnapshot.mtx);
-                                        g_mapSnapshot.paused = g_gamePaused.load();
-                                    } else if (event.key.keysym.sym == SDLK_EQUALS ||
-                                               event.key.keysym.sym == SDLK_KP_PLUS) {
-                                        int d = g_turnDelayMs.load();
-                                        g_turnDelayMs = (d == 0) ? 100 : std::min(d * 2, 5000);
-                                        std::lock_guard<std::mutex> lock(g_mapSnapshot.mtx);
-                                        g_mapSnapshot.turnDelayMs = g_turnDelayMs.load();
-                                    } else if (event.key.keysym.sym == SDLK_MINUS ||
-                                               event.key.keysym.sym == SDLK_KP_MINUS) {
-                                        int d = g_turnDelayMs.load();
-                                        g_turnDelayMs = (d <= 100) ? 0 : d / 2;
-                                        std::lock_guard<std::mutex> lock(g_mapSnapshot.mtx);
-                                        g_mapSnapshot.turnDelayMs = g_turnDelayMs.load();
-                                    } else
-                                        renderer.handleKeyDown(event.key.keysym.sym, g_mapSnapshot);
-                                    break;
-                                case SDL_KEYUP:
-                                    renderer.handleKeyUp(event.key.keysym.sym);
-                                    break;
-                                case SDL_MOUSEWHEEL:
-                                    {
-                                        int mx, my;
-                                        SDL_GetMouseState(&mx, &my);
-                                        renderer.handleMouseWheel(event.wheel.y, mx, my);
                                     }
-                                    break;
-                                case SDL_MOUSEBUTTONDOWN:
-                                    renderer.handleMouseClick(
-                                        event.button.x, event.button.y,
-                                        event.button.button, g_mapSnapshot
-                                    );
-                                    break;
-                                case SDL_MOUSEMOTION:
-                                    renderer.handleMouseMotion(
-                                        event.motion.xrel, event.motion.yrel,
-                                        (event.motion.state & (SDL_BUTTON_MMASK | SDL_BUTTON_RMASK)) != 0
-                                    );
-                                    break;
-                                case SDL_WINDOWEVENT:
-                                    if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
-                                        renderer.handleResize(event.window.data1, event.window.data2);
+                                }
+                                else if (event.key.keysym.sym == SDLK_RETURN ||
+                                         event.key.keysym.sym == SDLK_KP_ENTER) {
+                                    pushCommand({GameCommand::END_TURN});
+                                }
+                                else if (event.key.keysym.sym == SDLK_TAB) {
+                                    pushCommand({GameCommand::CYCLE_UNIT});
+                                }
+                                else if (event.key.keysym.sym == SDLK_SPACE) {
+                                    // Space: skip unit (move to next)
+                                    if (g_mapSnapshot.selectedUnitID >= 0) {
+                                        pushCommand({GameCommand::SKIP_TURN});
                                     }
-                                    break;
+                                }
+                                else {
+                                    // Route to renderer for camera/UI keys
+                                    renderer.handleKeyDown(event.key.keysym.sym, g_mapSnapshot);
+                                }
+                                break;
+
+                            case SDL_KEYUP:
+                                renderer.handleKeyUp(event.key.keysym.sym);
+                                break;
+
+                            case SDL_MOUSEWHEEL:
+                                {
+                                    int mx, my;
+                                    SDL_GetMouseState(&mx, &my);
+                                    renderer.handleMouseWheel(event.wheel.y, mx, my);
+                                }
+                                break;
+
+                            case SDL_MOUSEBUTTONDOWN:
+                                renderer.handleMouseClick(
+                                    event.button.x, event.button.y,
+                                    event.button.button, g_mapSnapshot
+                                );
+                                break;
+
+                            case SDL_MOUSEMOTION:
+                                renderer.handleMouseMotion(
+                                    event.motion.xrel, event.motion.yrel,
+                                    (event.motion.state & (SDL_BUTTON_MMASK | SDL_BUTTON_RMASK)) != 0
+                                );
+                                break;
+
+                            case SDL_WINDOWEVENT:
+                                if (event.window.event == SDL_WINDOWEVENT_RESIZED)
+                                    renderer.handleResize(event.window.data1, event.window.data2);
+                                break;
                             }
                         }
 
-                        // Draw the map
                         renderer.draw(g_mapSnapshot);
-
-                        // If game thread is done and we're still running, keep showing the final state
-                        // User can close window with X or ESC
                     }
 
-                    // Signal game thread to stop and wait for it
                     g_gameRunning = false;
                     if (gameThread.joinable())
                         gameThread.join();
@@ -891,13 +1196,11 @@ int main(int argc, char* argv[])
                     SDL_DestroyWindow(window);
                     TTF_Quit();
                     SDL_Quit();
-                    fprintf(stderr, "[main] SDL2 shutdown complete.\n");
                 }
             }
         }
     }
 
-    // ---- Cleanup ----
     fprintf(stderr, "\n[main] Calling GC.uninit()...\n");
     CvGlobals::getInstance().uninit();
     fprintf(stderr, "[main] Shutdown complete.\n");

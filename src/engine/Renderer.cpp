@@ -377,7 +377,10 @@ void Renderer::draw(MapSnapshot& snapshot)
 
         // --- HUD and minimap ---
         drawHUD(snapshot);
-        drawMinimap(snapshot);
+        if (m_showMinimap)
+            drawMinimap(snapshot);
+        if (m_showHelp)
+            drawHelpOverlay();
     }
 
     SDL_RenderPresent(m_renderer);
@@ -387,18 +390,34 @@ void Renderer::draw(MapSnapshot& snapshot)
 
 void Renderer::drawHUD(MapSnapshot& snapshot)
 {
-    // Dark semi-transparent bar at the top
-    SDL_Rect hudBg = {0, 0, 320, 28};
-    SDL_SetRenderDrawColor(m_renderer, 0, 0, 0, 200);
-    SDL_RenderFillRect(m_renderer, &hudBg);
-
     if (m_fontMedium) {
-        // Turn counter and year
+        // Top-left: turn & year
         char buf[128];
-        snprintf(buf, sizeof(buf), "Turn %d  |  Year %d", snapshot.gameTurn, snapshot.gameYear);
-        drawText(buf, 8, 5, m_fontMedium, 200, 220, 200);
+        snprintf(buf, sizeof(buf), "Turn %d  |  Year %d  |  Map %dx%d",
+                 snapshot.gameTurn, snapshot.gameYear, snapshot.width, snapshot.height);
+        int tw = 0, th = 0;
+        TTF_SizeText(m_fontMedium, buf, &tw, &th);
+
+        SDL_Rect hudBg = {0, 0, tw + 16, th + 8};
+        SDL_SetRenderDrawColor(m_renderer, 0, 0, 0, 200);
+        SDL_RenderFillRect(m_renderer, &hudBg);
+        drawText(buf, 8, 4, m_fontMedium, 200, 220, 200);
+
+        // Bottom-left: zoom level and FPS
+        float fps = (m_lastFrameTime > 0) ? (1000.0f / std::max(1u, SDL_GetTicks() - m_lastFrameTime + 1)) : 0;
+        snprintf(buf, sizeof(buf), "Zoom: %.1fx  |  FPS: %.0f", m_camera.zoom, fps);
+        TTF_SizeText(m_fontMedium, buf, &tw, &th);
+
+        SDL_Rect fpsBar = {0, m_windowH - th - 8, tw + 16, th + 8};
+        SDL_SetRenderDrawColor(m_renderer, 0, 0, 0, 200);
+        SDL_RenderFillRect(m_renderer, &fpsBar);
+        drawText(buf, 8, m_windowH - th - 4, m_fontMedium, 160, 180, 160);
     } else {
         // Fallback: dot-based turn counter (no font loaded)
+        SDL_Rect hudBg = {0, 0, 200, 24};
+        SDL_SetRenderDrawColor(m_renderer, 0, 0, 0, 200);
+        SDL_RenderFillRect(m_renderer, &hudBg);
+
         int dots = snapshot.gameTurn / 10;
         for (int i = 0; i < std::min(dots, 20); i++) {
             SDL_Rect dot = {4 + i * 9, 8, 7, 7};
@@ -486,6 +505,54 @@ void Renderer::drawMinimap(const MapSnapshot& snapshot)
     SDL_RenderDrawRect(m_renderer, &vp);
 }
 
+// ---------- Help overlay ----------
+
+void Renderer::drawHelpOverlay()
+{
+    if (!m_fontMedium) return;
+
+    const char* lines[] = {
+        "Controls:",
+        "  WASD / Arrows  - Pan camera",
+        "  Mouse wheel    - Zoom in/out",
+        "  Right-drag     - Pan camera",
+        "  F / Home       - Fit map to window",
+        "  M              - Toggle minimap",
+        "  H              - Toggle this help",
+        "  Escape         - Quit",
+    };
+    int numLines = sizeof(lines) / sizeof(lines[0]);
+
+    int lineH = 20;
+    int padX = 16, padY = 12;
+    int maxW = 0;
+    for (int i = 0; i < numLines; i++) {
+        int tw = 0, th = 0;
+        TTF_SizeText(m_fontMedium, lines[i], &tw, &th);
+        maxW = std::max(maxW, tw);
+    }
+
+    int boxW = maxW + padX * 2;
+    int boxH = numLines * lineH + padY * 2;
+    int boxX = (m_windowW - boxW) / 2;
+    int boxY = (m_windowH - boxH) / 2;
+
+    SDL_Rect bg = {boxX, boxY, boxW, boxH};
+    SDL_SetRenderDrawColor(m_renderer, 0, 0, 0, 220);
+    SDL_RenderFillRect(m_renderer, &bg);
+
+    // Border
+    SDL_SetRenderDrawColor(m_renderer, 100, 120, 100, 255);
+    SDL_RenderDrawRect(m_renderer, &bg);
+
+    for (int i = 0; i < numLines; i++) {
+        uint8_t r = (i == 0) ? 255 : 200;
+        uint8_t g = (i == 0) ? 255 : 220;
+        uint8_t b = (i == 0) ? 200 : 200;
+        drawText(lines[i], boxX + padX, boxY + padY + i * lineH, m_fontMedium, r, g, b);
+    }
+}
+
 // ---------- Input handling ----------
 
 void Renderer::handleKeyDown(SDL_Keycode key, MapSnapshot& snapshot)
@@ -501,6 +568,12 @@ void Renderer::handleKeyDown(SDL_Keycode key, MapSnapshot& snapshot)
                 if (snapshot.width > 0 && snapshot.height > 0)
                     autoFitCamera(snapshot);
             }
+            break;
+        case SDLK_m:
+            m_showMinimap = !m_showMinimap;
+            break;
+        case SDLK_h:
+            m_showHelp = !m_showHelp;
             break;
     }
 }

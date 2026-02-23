@@ -46,6 +46,10 @@ private:
     // Delta-time tracking (milliseconds)
     Uint32 m_lastFrameTime = 0;
 
+    // Toggle states
+    bool m_showMinimap = true;
+    bool m_showHelp = false;
+
     // Hex geometry constants (at zoom=1)
     // Flat-top hexagon: width = 2*R, height = sqrt(3)*R
     // Column spacing = 1.5*R (3/4 of width), row spacing = sqrt(3)*R
@@ -81,4 +85,7 @@ private:
 
     // Minimap
     void drawMinimap(const MapSnapshot& snapshot);
+
+    // Help overlay
+    void drawHelpOverlay();
 };

@@ -210,6 +210,7 @@ public:
 
 	bool isHasMet(TeamTypes eIndex) const;																		// Exposed to Python
 	void makeHasMet(TeamTypes eIndex, bool bNewDiplo);
+	void setHasMetDirect(TeamTypes eIndex);  // OpenCiv4: lightweight flag-only setter (no side effects)
 
 	DllExport bool isAtWar(TeamTypes eIndex) const;																			// Exposed to Python
 	DllExport void setAtWar(TeamTypes eIndex, bool bNewValue);

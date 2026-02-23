@@ -3472,7 +3472,13 @@ void CvTeamAI::AI_doWar()
 		
 		// overall war check (quite frequently true)
 		bool bMakeWarChecks = false;
-		if (iGetBetterUnitsCount * 3 < iNumMembers * 2)
+		// OpenCiv4: Relaxed gate — original BTS blocks war when most team members
+		// have AI_STRATEGY_GET_BETTER_UNITS. In headless mode, strategic resources
+		// are often unavailable (no workers improving tiles), so this gate permanently
+		// blocks all war. Allow war if at least SOME members don't have the strategy,
+		// OR if we're past turn 50 (enough time to have tried building military).
+		if (iGetBetterUnitsCount * 3 < iNumMembers * 2
+			|| GC.getGameINLINE().getElapsedGameTurns() > 50)
 		{
 			if (bFinancialProWar || !bFinancesOpposeWar)
 			{

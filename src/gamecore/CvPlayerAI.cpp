@@ -4666,7 +4666,7 @@ void CvPlayerAI::AI_chooseResearch()
 		{
 			int iAIResearchDepth;
 			iAIResearchDepth = AI_isDoStrategy(AI_STRATEGY_CULTURE3) ? 1 : 3;
-			
+
 			eBestTech = AI_bestTech((isHuman()) ? 1 : iAIResearchDepth);
 		}
 

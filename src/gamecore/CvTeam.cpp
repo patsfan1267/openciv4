@@ -3412,6 +3412,16 @@ void CvTeam::makeHasMet(TeamTypes eIndex, bool bNewDiplo)
 }
 
 
+// OpenCiv4: Lightweight setter — just sets the m_abHasMet flag without
+// triggering updateTechShare, diplomacy popups, or event callbacks.
+// Used during headless initialization to establish team contact safely.
+void CvTeam::setHasMetDirect(TeamTypes eIndex)
+{
+	FAssertMsg(eIndex >= 0, "eIndex is expected to be non-negative (invalid Index)");
+	FAssertMsg(eIndex < MAX_TEAMS, "eIndex is expected to be within maximum bounds (invalid Index)");
+	m_abHasMet[eIndex] = true;
+}
+
 bool CvTeam::isAtWar(TeamTypes eIndex) const
 {
 	FAssertMsg(eIndex >= 0, "eIndex is expected to be non-negative (invalid Index)");

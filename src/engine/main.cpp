@@ -11,6 +11,21 @@
 
 #include <cstdio>
 #include <cstdint>
+#include <csignal>
+#include <cstdlib>
+
+// Crash handler to print which turn/phase we were in when crashing
+static volatile int g_crashTurn = -1;
+static volatile int g_crashPlayer = -1;
+static volatile int g_crashPhase = -1; // 0=doTurn,1=doTurnUnits,2=AI_unitUpdate,3=game.doTurn
+
+static void crashHandler(int sig) {
+    fprintf(stderr, "\n!!! CRASH (signal %d) at turn=%d player=%d phase=%d !!!\n",
+            sig, g_crashTurn, g_crashPlayer, g_crashPhase);
+    fflush(stderr);
+    _exit(139);
+}
+
 
 // Pull in the gamecore's global singleton and types
 #include "CvGameCoreDLL.h"
@@ -20,6 +35,7 @@
 #include "CvGameAI.h"
 #include "CvPlayerAI.h"
 #include "CvTeamAI.h"
+#include "AI_Defines.h"
 #include "CvMap.h"
 #include "CvMapGenerator.h"
 
@@ -62,6 +78,8 @@ static int findCivLeaderPairs(CivLeaderPair* pairs, int maxPairs)
 
 int main(int argc, char* argv[])
 {
+    signal(SIGSEGV, crashHandler);
+    signal(SIGABRT, crashHandler);
     fprintf(stderr, "=== OpenCiv4 Engine ===\n");
     fprintf(stderr, "Phase 0: Headless Mode\n");
     fprintf(stderr, "Build: 64-bit (%zu-byte pointers)\n\n", sizeof(void*));
@@ -286,9 +304,6 @@ int main(int argc, char* argv[])
     // (CvGame::init called initScoreCalculation before the map existed)
     GC.getGameINLINE().initScoreCalculation();
 
-    // Mark game as ready
-    GC.getGameINLINE().setFinalInitialized(true);
-
     // Set active player so getActivePlayer() doesn't return NO_PLAYER
     GC.getInitCore().setActivePlayer((PlayerTypes)0);
     fprintf(stderr, "[main] Active player set to 0.\n");
@@ -312,6 +327,28 @@ int main(int argc, char* argv[])
         }
     }
     fprintf(stderr, "[main] All plots revealed.\n");
+
+    // Mark game as ready
+    GC.getGameINLINE().setFinalInitialized(true);
+
+    // Establish diplomatic contact between all alive teams.
+    // In real BTS, teams "meet" when their units encounter each other.
+    // Without this, AI_doWar() checks isHasMet() and never declares war.
+    // Use setHasMetDirect() to set the flag without side effects.
+    fprintf(stderr, "[main] Establishing contact between all teams...\n");
+    for (int i = 0; i < MAX_TEAMS; i++)
+    {
+        if (!GET_TEAM((TeamTypes)i).isAlive())
+            continue;
+        for (int j = i + 1; j < MAX_TEAMS; j++)
+        {
+            if (!GET_TEAM((TeamTypes)j).isAlive())
+                continue;
+            GET_TEAM((TeamTypes)i).setHasMetDirect((TeamTypes)j);
+            GET_TEAM((TeamTypes)j).setHasMetDirect((TeamTypes)i);
+        }
+    }
+    fprintf(stderr, "[main] All teams have met.\n");
 
     // Print starting positions
     for (int p = 0; p < MAX_CIV_PLAYERS; p++)
@@ -369,34 +406,93 @@ int main(int argc, char* argv[])
                 // knows about valid city sites (needed for settler training).
                 ((CvPlayerAI&)kPlayer).AI_updateFoundValues();
 
-                // Turn processing: doTurn (cities produce), doTurnUnits (refresh
-                // movement), AI_unitUpdate (units act — settlers found, warriors move).
+                g_crashTurn = iTurn; g_crashPlayer = p;
+                g_crashPhase = 0;
                 kPlayer.doTurn();
+
+                // OpenCiv4 fallback: if the AI failed to pick research, force it
+                if (kPlayer.getCurrentResearch() == NO_TECH && kPlayer.isResearch()
+                    && !kPlayer.isBarbarian())
+                {
+                    for (int t = 0; t < GC.getNumTechInfos(); t++)
+                    {
+                        if (kPlayer.canResearch((TechTypes)t))
+                        {
+                            kPlayer.pushResearch((TechTypes)t, true);
+                            if (iTurn < 5 || iTurn % 50 == 0)
+                                fprintf(stderr, "  [FORCE-RES] P%d forced tech %d at turn %d\n", p, t, iTurn);
+                            break;
+                        }
+                    }
+                }
+
+                g_crashPhase = 1;
                 kPlayer.doTurnUnits();
+                g_crashPhase = 2;
                 kPlayer.AI_unitUpdate();
             }
         }
         GC.getGameINLINE().setActivePlayer((PlayerTypes)0);
 
         // Advance the game turn (team turns, map turn, barbarians, etc.)
+        g_crashPhase = 3;
         GC.getGameINLINE().doTurn();
 
-        // Progress report every 10 turns
-        if (iTurn % 10 == 0)
+        // Progress report every 50 turns
+        if (iTurn % 50 == 0)
         {
-            fprintf(stderr, "  Turn %3d:", iTurn);
+            fprintf(stderr, "--- Turn %d ---\n", iTurn);
             for (int p = 0; p < MAX_CIV_PLAYERS; p++)
             {
                 CvPlayer& kPlayer = GET_PLAYER((PlayerTypes)p);
                 if (kPlayer.isAlive())
                 {
-                    fprintf(stderr, "  P%d[c=%d u=%d pop=%d sc=%d]", p,
+                    int numWars = GET_TEAM(kPlayer.getTeam()).getAtWarCount(true);
+                    int numTechs = 0;
+                    for (int tt = 0; tt < GC.getNumTechInfos(); tt++)
+                        if (GET_TEAM(kPlayer.getTeam()).isHasTech((TechTypes)tt)) numTechs++;
+                    fprintf(stderr, "  P%d: cities=%d units=%d pop=%d techs=%d score=%d wars=%d\n", p,
                             kPlayer.getNumCities(), kPlayer.getNumUnits(),
-                            kPlayer.getTotalPopulation(),
-                            GC.getGameINLINE().getPlayerScore((PlayerTypes)p));
+                            kPlayer.getTotalPopulation(), numTechs,
+                            GC.getGameINLINE().getPlayerScore((PlayerTypes)p),
+                            numWars);
                 }
             }
-            fprintf(stderr, "\n");
+            // War AI diagnostics
+            for (int t = 0; t < MAX_CIV_TEAMS; t++)
+            {
+                CvTeamAI& kTeam = GET_TEAM((TeamTypes)t);
+                if (!kTeam.isAlive() || kTeam.isBarbarian() || kTeam.isMinorCiv())
+                    continue;
+                int warPlanCount = kTeam.getAnyWarPlanCount(true);
+                int hasMet = kTeam.getHasMetCivCount(true);
+                int power = kTeam.getPower(true);
+                // Check per-player AI strategies
+                int betterUnits = 0, finTrouble = 0, dagger = 0;
+                for (int p2 = 0; p2 < MAX_PLAYERS; p2++)
+                {
+                    CvPlayerAI& kP = GET_PLAYER((PlayerTypes)p2);
+                    if (kP.isAlive() && kP.getTeam() == (TeamTypes)t)
+                    {
+                        if (kP.AI_isDoStrategy(AI_STRATEGY_GET_BETTER_UNITS)) betterUnits++;
+                        if (kP.AI_isFinancialTrouble()) finTrouble++;
+                        if (kP.AI_isDoStrategy(AI_STRATEGY_DAGGER)) dagger++;
+                    }
+                }
+                fprintf(stderr, "  [WAR] Team%d: plans=%d met=%d pow=%d getBetter=%d finTrouble=%d dagger=%d",
+                        t, warPlanCount, hasMet, power, betterUnits, finTrouble, dagger);
+                // Show war plans against each other team
+                for (int t2 = 0; t2 < MAX_CIV_TEAMS; t2++)
+                {
+                    if (t2 == t) continue;
+                    CvTeamAI& kOther = GET_TEAM((TeamTypes)t2);
+                    if (!kOther.isAlive() || kOther.isBarbarian()) continue;
+                    WarPlanTypes ePlan = kTeam.AI_getWarPlan((TeamTypes)t2);
+                    if (ePlan != NO_WARPLAN)
+                        fprintf(stderr, " vs%d=plan%d", t2, (int)ePlan);
+                }
+                fprintf(stderr, "\n");
+            }
         }
 
         // Check if game ended

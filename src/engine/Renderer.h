@@ -1,9 +1,10 @@
 #pragma once
-// Renderer — 2D hex-grid map renderer using SDL2 + SDL2_ttf
+// Renderer — 2D square-grid map renderer using SDL2 + SDL2_ttf
 //
-// Renders the game map as colored hexagons with terrain colors,
+// Renders the game map as colored squares with terrain colors,
 // city markers, territory borders, river indicators, city name
 // labels, feature overlays, HUD text, and a minimap.
+// Civ4 uses a square tile grid (hexes were introduced in Civ5).
 
 #include <SDL.h>
 #include <SDL_ttf.h>
@@ -58,15 +59,8 @@ private:
     bool m_showPlayerPanel = true;
     bool m_showGrid = false;
 
-    // Hex geometry constants (at zoom=1)
-    // Flat-top hexagon: width = 2*R, height = sqrt(3)*R
-    // Column spacing = 1.5*R (3/4 of width), row spacing = sqrt(3)*R
-    // Odd columns are offset down by half a row
-    static constexpr float HEX_RADIUS = 16.0f;      // center to vertex
-    static constexpr float HEX_WIDTH = 2.0f * HEX_RADIUS;          // 32
-    static constexpr float HEX_HEIGHT = 1.732050808f * HEX_RADIUS;  // ~27.7
-    static constexpr float COL_SPACING = 1.5f * HEX_RADIUS;        // 24
-    static constexpr float ROW_SPACING = HEX_HEIGHT;               // ~27.7
+    // Square tile geometry constants (at zoom=1)
+    static constexpr float TILE_SIZE = 24.0f;  // pixels per tile side
 
     // Auto-fit camera on first frame with valid map data
     bool m_cameraInitialized = false;
@@ -75,15 +69,15 @@ private:
     // Minimap bounds (updated each frame for click-to-jump)
     int m_mmX = 0, m_mmY = 0, m_mmW = 0, m_mmH = 0;
 
-    // Hex drawing helpers
-    void hexCenter(int col, int row, int mapHeight, float& cx, float& cy) const;
-    void drawFilledHex(float cx, float cy, float radius, uint8_t r, uint8_t g, uint8_t b);
-    void drawHexOutline(float cx, float cy, float radius, uint8_t r, uint8_t g, uint8_t b);
-    void drawHexEdge(float cx, float cy, float radius, int edgeIndex,
-                     uint8_t r, uint8_t g, uint8_t b, int thickness);
+    // Tile drawing helpers
+    void tileTopLeft(int col, int row, int mapHeight, float& tx, float& ty) const;
+    void drawFilledTile(float tx, float ty, float size, uint8_t r, uint8_t g, uint8_t b);
+    void drawTileOutline(float tx, float ty, float size, uint8_t r, uint8_t g, uint8_t b);
+    void drawTileEdge(float tx, float ty, float size, int edge,
+                      uint8_t r, uint8_t g, uint8_t b, int thickness);
 
     // Feature overlays (forests, jungle, etc.)
-    void drawFeatureOverlay(float cx, float cy, float radius, int featureType);
+    void drawFeatureOverlay(float cx, float cy, float halfSize, int featureType);
 
     // Text rendering
     TTF_Font* m_fontSmall = nullptr;   // 11pt — city labels

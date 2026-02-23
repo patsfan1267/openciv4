@@ -22,14 +22,15 @@ static TerrainIconMap terrainIcons[] = {
     { 6, "art/interface/buttons/baseterrain/ocean.dds" },
 };
 
+// Feature type order from CIV4FeatureInfos.xml:
+// 0=ICE, 1=JUNGLE, 2=OASIS, 3=FLOOD_PLAINS, 4=FOREST, 5=FALLOUT
 static FeatureIconMap featureIcons[] = {
-    { 0, "art/interface/buttons/terrainfeatures/forest.dds" },
+    { 0, "art/interface/buttons/terrainfeatures/ice.dds" },
     { 1, "art/interface/buttons/terrainfeatures/jungle.dds" },
     { 2, "art/interface/buttons/terrainfeatures/oasis.dds" },
     { 3, "art/interface/buttons/terrainfeatures/floodplains.dds" },
-    { 4, "art/interface/buttons/terrainfeatures/fallout.dds" },
-    { 5, "art/interface/buttons/terrainfeatures/forestevergreen.dds" },
-    { 6, "art/interface/buttons/terrainfeatures/forestsnowyevergreen.dds" },
+    { 4, "art/interface/buttons/terrainfeatures/forest.dds" },
+    { 5, "art/interface/buttons/terrainfeatures/fallout.dds" },
 };
 
 // 512x512 seamless blend textures for map rendering
@@ -47,10 +48,11 @@ static TerrainIconMap terrainBlends[] = {
     { -2, "art/terrain/textures/hillblend.dds" },
 };
 
-// Feature blend textures
+// Feature blend textures (only forest and jungle have blend textures)
+// 0=ICE, 1=JUNGLE, 2=OASIS, 3=FLOOD_PLAINS, 4=FOREST, 5=FALLOUT
 static FeatureIconMap featureBlends[] = {
-    { 0, "art/terrain/textures/forestblend.dds" },
     { 1, "art/terrain/textures/jungleblend.dds" },
+    { 4, "art/terrain/textures/forestblend.dds" },
 };
 
 AssetManager::~AssetManager() {

@@ -630,6 +630,8 @@ namespace mat4 {
 }
 
 void GLRenderer::draw3DModels(const MapSnapshot& snapshot) {
+    // TODO: 3D model rendering disabled until lighting/texturing is improved
+    return;
     if (!m_assets || !m_shader3D.id()) return;
 
     float screenTileSize = TILE_SIZE * m_camera.zoom;
@@ -657,7 +659,7 @@ void GLRenderer::draw3DModels(const MapSnapshot& snapshot) {
     float len = sqrtf(lightDir[0]*lightDir[0] + lightDir[1]*lightDir[1] + lightDir[2]*lightDir[2]);
     lightDir[0] /= len; lightDir[1] /= len; lightDir[2] /= len;
     glUniform3f(glGetUniformLocation(m_shader3D.id(), "uLightDir"), lightDir[0], lightDir[1], lightDir[2]);
-    glUniform3f(glGetUniformLocation(m_shader3D.id(), "uAmbient"), 0.35f, 0.35f, 0.35f);
+    glUniform3f(glGetUniformLocation(m_shader3D.id(), "uAmbient"), 0.55f, 0.55f, 0.55f);
     glUniform1i(glGetUniformLocation(m_shader3D.id(), "uTexture3D"), 0);
 
     // Visible tile range
@@ -830,7 +832,9 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                 screenTY + screenTileSize < 0 || screenTY > m_windowH) continue;
 
             // Fog of war brightness: 0.45 for revealed-but-not-visible, 1.0 for visible
-            float fogBright = (plot.visibility == 1) ? 0.45f : 1.0f;
+            // Fog of war: vis=1 = revealed but not currently visible
+            // TODO: re-enable dimming once proper fog of war is implemented
+            float fogBright = 1.0f;
 
             bool isWater = (plot.terrainType == 5 || plot.terrainType == 6); // COAST=5, OCEAN=6
 
@@ -895,8 +899,9 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                             m_shader.setInt("uUseTexture", 1);
                             curBoundTex = tex;
                         }
-                        // World-space UV: texture repeats every 2 tiles for detail
-                        float tilesPerTex = 2.0f;
+                        // Continuous world-space UVs — seamless tiling across tiles
+                        // Texture repeats every 4 tiles for good detail/variety balance
+                        float tilesPerTex = 4.0f;
                         float u0 = (float)x / tilesPerTex;
                         float v0 = (float)y / tilesPerTex;
                         float u1 = u0 + 1.0f / tilesPerTex;
@@ -962,7 +967,9 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                 if (screenTX + screenTileSize < 0 || screenTX > m_windowW ||
                     screenTY + screenTileSize < 0 || screenTY > m_windowH) continue;
 
-                float fogBright = (plot.visibility == 1) ? 0.45f : 1.0f;
+                // Fog of war: vis=1 = revealed but not currently visible
+            // TODO: re-enable dimming once proper fog of war is implemented
+            float fogBright = 1.0f;
                 // Check each edge: if neighbor has higher priority, blend their texture into this tile
                 for (int e = 0; e < 4; e++) {
                     int nx = x + nDx[e], ny = y + nDy[e];
@@ -997,9 +1004,9 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                     }
 
                     // Blend strip on the edge facing the neighbor
-                    float blendFrac = neighborIsWater ? 0.35f : 0.30f;
+                    float blendFrac = neighborIsWater ? 0.25f : 0.25f;
                     float bx = screenTX, by = screenTY, bw = screenTileSize, bh = screenTileSize;
-                    float alpha = neighborIsWater ? 0.55f : 0.45f;
+                    float alpha = neighborIsWater ? 0.35f : 0.35f;
 
                     // UV for the blend strip (use neighbor tile coords for continuity)
                     float tilesPerTex = 2.0f;
@@ -1062,8 +1069,7 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                     screenTY + screenTileSize < 0 || screenTY > m_windowH) continue;
 
                 GLuint ftex = m_assets->getFeatureBlendGL(plot.featureType);
-                if (!ftex) ftex = m_assets->getFeatureTextureGL(plot.featureType); // fallback to icon
-                if (!ftex) continue;
+                if (!ftex) continue; // skip features without blend textures (no button icon fallback)
 
                 if (ftex != curBoundTex) {
                     flushBatch();
@@ -1076,7 +1082,7 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                 float u1 = u0 + 1.0f / tilesPerTex;
                 float v1 = v0 + 1.0f / tilesPerTex;
                 pushQuad(screenTX, screenTY, screenTileSize, screenTileSize,
-                         1.0f, 1.0f, 1.0f, 0.7f, ftex, u0, v0, u1, v1);
+                         1.0f, 1.0f, 1.0f, 0.6f, ftex, u0, v0, u1, v1);
             }
         }
         flushBatch();
@@ -1109,7 +1115,7 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
 
             // Territory overlay (dimmed in fog)
             if (plot.ownerID >= 0) {
-                float fogAlpha = (plot.visibility == 1) ? 0.08f : 0.18f;
+                float fogAlpha = 0.18f;
                 pushQuad(screenTX, screenTY, screenTileSize, screenTileSize,
                          plot.ownerColorR / 255.0f, plot.ownerColorG / 255.0f, plot.ownerColorB / 255.0f, fogAlpha);
             }
@@ -1126,15 +1132,15 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                 pushQuad(screenTX, screenTY, lw, screenTileSize, 0.16f, 0.16f, 0.2f, 1);
             }
 
-            // Rivers
+            // Rivers — drawn as semi-transparent blue strips along tile edges
             if (screenTileSize >= 4) {
-                float riverThk = std::max(2.0f, screenTileSize * 0.1f);
+                float riverThk = std::max(3.0f, screenTileSize * 0.12f);
                 if (plot.isNOfRiver)
-                    pushQuad(screenTX, screenTY, screenTileSize, riverThk,
-                             40 / 255.0f, 120 / 255.0f, 220 / 255.0f, 1.0f);
+                    pushQuad(screenTX, screenTY - riverThk * 0.5f, screenTileSize, riverThk,
+                             0.12f, 0.35f, 0.65f, 0.85f);
                 if (plot.isWOfRiver)
-                    pushQuad(screenTX, screenTY, riverThk, screenTileSize,
-                             40 / 255.0f, 120 / 255.0f, 220 / 255.0f, 1.0f);
+                    pushQuad(screenTX - riverThk * 0.5f, screenTY, riverThk, screenTileSize,
+                             0.12f, 0.35f, 0.65f, 0.85f);
             }
 
             // Territory borders
@@ -1160,19 +1166,22 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                 }
             }
 
-            // Feature overlays (colored markers — only when no blend textures)
-            if (!haveBlend && plot.featureType >= 0 && screenTileSize >= 6) {
-                float cx = screenTX + screenTileSize * 0.5f;
-                float cy = screenTY + screenTileSize * 0.5f;
-                float sz = screenTileSize * 0.35f;
-                if (plot.featureType == 0) // Forest
-                    pushQuad(cx - sz * 0.5f, cy - sz * 0.5f, sz, sz, 0, 0.31f, 0, 0.6f);
-                else if (plot.featureType == 1) // Jungle
-                    pushQuad(cx - sz * 0.5f, cy - sz * 0.5f, sz, sz, 0, 0.39f, 0.08f, 0.6f);
-                else if (plot.featureType == 2) // Oasis
-                    pushQuad(cx - sz * 0.4f, cy - sz * 0.4f, sz * 0.8f, sz * 0.8f, 0, 0.78f, 0.78f, 0.6f);
-                else if (plot.featureType == 6) // Ice
-                    pushQuad(cx - sz * 0.4f, cy - sz * 0.4f, sz * 0.8f, sz * 0.8f, 0.7f, 0.86f, 1, 0.5f);
+            // Feature overlays (colored tint for features without blend textures)
+            if (plot.featureType >= 0 && screenTileSize >= 6) {
+                bool hasBlendTex = haveBlend && m_assets && m_assets->getFeatureBlendGL(plot.featureType);
+                if (!hasBlendTex) {
+                    // Subtle full-tile tint for features without blend textures
+                    // 0=ICE, 1=JUNGLE, 2=OASIS, 3=FLOOD_PLAINS, 4=FOREST, 5=FALLOUT
+                    float fr = 0, fg = 0, fb = 0, fa = 0;
+                    switch (plot.featureType) {
+                        case 0: fr=0.70f; fg=0.82f; fb=0.95f; fa=0.35f; break; // Ice: white-blue tint
+                        case 2: fr=0.10f; fg=0.50f; fb=0.50f; fa=0.25f; break; // Oasis: cyan tint
+                        case 3: fr=0.30f; fg=0.50f; fb=0.15f; fa=0.20f; break; // Flood plains: green-brown
+                        case 5: fr=0.35f; fg=0.30f; fb=0.15f; fa=0.30f; break; // Fallout: grey-brown
+                    }
+                    if (fa > 0)
+                        pushQuad(screenTX, screenTY, screenTileSize, screenTileSize, fr, fg, fb, fa);
+                }
             }
 
             // City marker (only on currently visible tiles)

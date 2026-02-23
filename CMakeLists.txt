@@ -42,6 +42,11 @@ set(SDL2_DIR "${CMAKE_SOURCE_DIR}/third_party/SDL2")
 set(SDL2_INCLUDE_DIR "${SDL2_DIR}/include")
 set(SDL2_LIB_DIR "${SDL2_DIR}/lib/x64")
 
+# --- SDL2_ttf ---
+set(SDL2_TTF_DIR "${CMAKE_SOURCE_DIR}/third_party/SDL2_ttf")
+set(SDL2_TTF_INCLUDE_DIR "${SDL2_TTF_DIR}/include")
+set(SDL2_TTF_LIB_DIR "${SDL2_TTF_DIR}/lib/x64")
+
 # --- Engine host (our code) ---
 add_subdirectory(src/engine)
 
@@ -53,8 +58,9 @@ add_executable(openciv4 src/engine/main.cpp)
 target_link_libraries(openciv4 PRIVATE engine gamecore winmm
     "${SDL2_LIB_DIR}/SDL2.lib"
     "${SDL2_LIB_DIR}/SDL2main.lib"
+    "${SDL2_TTF_LIB_DIR}/SDL2_ttf.lib"
 )
-target_include_directories(openciv4 PRIVATE "${SDL2_INCLUDE_DIR}")
+target_include_directories(openciv4 PRIVATE "${SDL2_INCLUDE_DIR}" "${SDL2_TTF_INCLUDE_DIR}")
 target_link_options(openciv4 PRIVATE /MAP /SUBSYSTEM:CONSOLE)
 
 # main.cpp includes CvGameCoreDLL.h which needs these defines
@@ -72,9 +78,21 @@ if(MSVC)
     target_compile_options(openciv4 PRIVATE /W0 /Zc:forScope-)
 endif()
 
-# Copy SDL2.dll next to the executable
+# Copy SDL2.dll and SDL2_ttf.dll next to the executable
 add_custom_command(TARGET openciv4 POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${SDL2_LIB_DIR}/SDL2.dll"
         $<TARGET_FILE_DIR:openciv4>
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${SDL2_TTF_LIB_DIR}/SDL2_ttf.dll"
+        $<TARGET_FILE_DIR:openciv4>
+)
+
+# Copy font to build directory
+add_custom_command(TARGET openciv4 POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "$<TARGET_FILE_DIR:openciv4>/assets/fonts"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/assets/fonts/DejaVuSans.ttf"
+        "$<TARGET_FILE_DIR:openciv4>/assets/fonts/DejaVuSans.ttf"
 )

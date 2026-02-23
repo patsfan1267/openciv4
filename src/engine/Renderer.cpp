@@ -1,7 +1,6 @@
-// Renderer.cpp — 2D map renderer with hex grid
+// Renderer.cpp — 2D hex-grid map renderer
 //
-// Milestone 3: Flat-top hexagonal grid with terrain colors,
-// camera controls, territory borders, city markers, rivers.
+// Milestone 3-5: Hex grid, text labels, feature overlays, minimap, HUD.
 
 #include "Renderer.h"
 #include <cstdio>
@@ -19,31 +18,45 @@ Renderer::Renderer(SDL_Renderer* sdlRenderer, int windowW, int windowH)
 {
 }
 
+Renderer::~Renderer()
+{
+    if (m_fontSmall)  TTF_CloseFont(m_fontSmall);
+    if (m_fontMedium) TTF_CloseFont(m_fontMedium);
+}
+
+bool Renderer::initFonts(const char* fontPath)
+{
+    m_fontSmall = TTF_OpenFont(fontPath, 11);
+    m_fontMedium = TTF_OpenFont(fontPath, 14);
+
+    if (!m_fontSmall || !m_fontMedium) {
+        fprintf(stderr, "[renderer] Warning: Could not load font '%s': %s\n",
+                fontPath, TTF_GetError());
+        // Non-fatal — renderer works without fonts, just no text
+        return false;
+    }
+
+    fprintf(stderr, "[renderer] Loaded font: %s (11pt + 14pt)\n", fontPath);
+    return true;
+}
+
 // ---------- Hex geometry helpers ----------
 
 void Renderer::hexCenter(int col, int row, int mapHeight, float& cx, float& cy) const
 {
-    // Flat-top hex layout:
-    //   Column spacing = 1.5 * R (columns interlock)
-    //   Row spacing = sqrt(3) * R
-    //   Odd columns shift down by half a row
     cx = col * COL_SPACING + HEX_RADIUS;
 
-    // Flip Y: game row 0 is at bottom, screen Y=0 is at top
     int flippedRow = mapHeight - 1 - row;
     cy = flippedRow * ROW_SPACING + HEX_HEIGHT / 2.0f;
 
-    // Odd columns shift down by half a row
     if (col % 2 != 0)
         cy += ROW_SPACING / 2.0f;
 }
 
 void Renderer::drawFilledHex(float cx, float cy, float radius, uint8_t r, uint8_t g, uint8_t b)
 {
-    // 7 vertices: center + 6 corners
     SDL_Vertex verts[7];
 
-    // Center vertex
     verts[0].position.x = cx;
     verts[0].position.y = cy;
     verts[0].color.r = r;
@@ -53,7 +66,6 @@ void Renderer::drawFilledHex(float cx, float cy, float radius, uint8_t r, uint8_
     verts[0].tex_coord.x = 0;
     verts[0].tex_coord.y = 0;
 
-    // 6 corner vertices
     for (int i = 0; i < 6; i++) {
         verts[i + 1].position.x = cx + radius * HEX_COS[i];
         verts[i + 1].position.y = cy + radius * HEX_SIN[i];
@@ -62,7 +74,6 @@ void Renderer::drawFilledHex(float cx, float cy, float radius, uint8_t r, uint8_
         verts[i + 1].tex_coord.y = 0;
     }
 
-    // 6 triangles: center(0) → corner[i] → corner[i+1]
     int indices[18];
     for (int i = 0; i < 6; i++) {
         indices[i * 3]     = 0;
@@ -85,11 +96,106 @@ void Renderer::drawHexOutline(float cx, float cy, float radius, uint8_t r, uint8
     }
 }
 
+// ---------- Feature overlays ----------
+
+void Renderer::drawFeatureOverlay(float cx, float cy, float radius, int featureType)
+{
+    // Feature types (standard BTS order):
+    // 0 = FEATURE_FOREST, 1 = FEATURE_JUNGLE, 2 = FEATURE_OASIS,
+    // 4 = FEATURE_FLOOD_PLAINS, 5 = FEATURE_FALLOUT, 6 = FEATURE_ICE
+
+    if (featureType == 0) {
+        // Forest — draw a small triangle (tree)
+        SDL_SetRenderDrawColor(m_renderer, 0, 80, 0, 255);
+        float h = radius * 0.5f;
+        float w = radius * 0.3f;
+        // Triangle top
+        int tx = (int)cx, ty = (int)(cy - h * 0.6f);
+        int lx = (int)(cx - w), ly = (int)(cy + h * 0.3f);
+        int rx = (int)(cx + w), ry = ly;
+        SDL_RenderDrawLine(m_renderer, tx, ty, lx, ly);
+        SDL_RenderDrawLine(m_renderer, lx, ly, rx, ry);
+        SDL_RenderDrawLine(m_renderer, rx, ry, tx, ty);
+        // Trunk
+        SDL_RenderDrawLine(m_renderer, (int)cx, (int)(cy + h * 0.3f),
+                                       (int)cx, (int)(cy + h * 0.6f));
+    }
+    else if (featureType == 1) {
+        // Jungle — two overlapping triangles
+        SDL_SetRenderDrawColor(m_renderer, 0, 100, 20, 255);
+        float h = radius * 0.5f;
+        float w = radius * 0.25f;
+        float off = radius * 0.15f;
+        for (int t = 0; t < 2; t++) {
+            float ox = (t == 0) ? -off : off;
+            int tx = (int)(cx + ox), ty = (int)(cy - h * 0.5f);
+            int lx = (int)(cx + ox - w), ly = (int)(cy + h * 0.3f);
+            int rx = (int)(cx + ox + w), ry = ly;
+            SDL_RenderDrawLine(m_renderer, tx, ty, lx, ly);
+            SDL_RenderDrawLine(m_renderer, lx, ly, rx, ry);
+            SDL_RenderDrawLine(m_renderer, rx, ry, tx, ty);
+        }
+    }
+    else if (featureType == 2) {
+        // Oasis — small cyan circle (4 lines approximation)
+        SDL_SetRenderDrawColor(m_renderer, 0, 200, 200, 255);
+        float r = radius * 0.25f;
+        int segments = 8;
+        float prevX = cx + r, prevY = cy;
+        for (int i = 1; i <= segments; i++) {
+            float angle = (float)i / segments * 6.283185f;
+            float nx = cx + r * cosf(angle);
+            float ny = cy + r * sinf(angle);
+            SDL_RenderDrawLine(m_renderer, (int)prevX, (int)prevY, (int)nx, (int)ny);
+            prevX = nx;
+            prevY = ny;
+        }
+    }
+    else if (featureType == 6) {
+        // Ice — light blue X
+        SDL_SetRenderDrawColor(m_renderer, 180, 220, 255, 255);
+        float s = radius * 0.25f;
+        SDL_RenderDrawLine(m_renderer, (int)(cx - s), (int)(cy - s),
+                                       (int)(cx + s), (int)(cy + s));
+        SDL_RenderDrawLine(m_renderer, (int)(cx + s), (int)(cy - s),
+                                       (int)(cx - s), (int)(cy + s));
+    }
+}
+
+// ---------- Text rendering ----------
+
+void Renderer::drawText(const std::string& text, int x, int y, TTF_Font* font,
+                        uint8_t r, uint8_t g, uint8_t b)
+{
+    if (!font || text.empty()) return;
+
+    SDL_Color color = {r, g, b, 255};
+    SDL_Surface* surface = TTF_RenderText_Blended(font, text.c_str(), color);
+    if (!surface) return;
+
+    SDL_Texture* texture = SDL_CreateTextureFromSurface(m_renderer, surface);
+    if (texture) {
+        SDL_Rect dst = {x, y, surface->w, surface->h};
+        SDL_RenderCopy(m_renderer, texture, nullptr, &dst);
+        SDL_DestroyTexture(texture);
+    }
+    SDL_FreeSurface(surface);
+}
+
+void Renderer::drawTextCentered(const std::string& text, int cx, int cy, TTF_Font* font,
+                                uint8_t r, uint8_t g, uint8_t b)
+{
+    if (!font || text.empty()) return;
+
+    int tw = 0, th = 0;
+    TTF_SizeText(font, text.c_str(), &tw, &th);
+    drawText(text, cx - tw / 2, cy - th / 2, font, r, g, b);
+}
+
 // ---------- Camera ----------
 
 void Renderer::autoFitCamera(const MapSnapshot& snapshot)
 {
-    // Total world-space dimensions of the hex map
     float mapPixelW = (snapshot.width - 1) * COL_SPACING + HEX_WIDTH;
     float mapPixelH = (snapshot.height - 1) * ROW_SPACING + HEX_HEIGHT + ROW_SPACING / 2.0f;
 
@@ -98,7 +204,6 @@ void Renderer::autoFitCamera(const MapSnapshot& snapshot)
     m_camera.zoom = std::min(zoomX, zoomY);
     m_camera.zoom = std::max(0.1f, std::min(m_camera.zoom, 20.0f));
 
-    // Center the map in the window
     float scaledW = mapPixelW * m_camera.zoom;
     float scaledH = mapPixelH * m_camera.zoom;
     m_camera.offsetX = -(m_windowW - scaledW) / (2.0f * m_camera.zoom);
@@ -125,7 +230,6 @@ void Renderer::draw(MapSnapshot& snapshot)
     SDL_SetRenderDrawColor(m_renderer, 10, 20, 40, 255);
     SDL_RenderClear(m_renderer);
 
-    // Lock the snapshot and draw
     {
         std::lock_guard<std::mutex> lock(snapshot.mtx);
 
@@ -134,7 +238,6 @@ void Renderer::draw(MapSnapshot& snapshot)
             return;
         }
 
-        // Auto-fit camera on first frame with valid map data
         if (!m_cameraInitialized) {
             autoFitCamera(snapshot);
             m_cameraInitialized = true;
@@ -142,38 +245,39 @@ void Renderer::draw(MapSnapshot& snapshot)
 
         float screenRadius = HEX_RADIUS * m_camera.zoom;
 
+        // --- Pass 1: Draw all hex tiles ---
         for (int y = 0; y < snapshot.height; y++) {
             for (int x = 0; x < snapshot.width; x++) {
                 const PlotData& plot = snapshot.getPlot(x, y);
 
-                // Get world-space hex center
                 float worldCX, worldCY;
                 hexCenter(x, y, snapshot.height, worldCX, worldCY);
 
-                // Transform to screen space
                 float screenCX = (worldCX - m_camera.offsetX) * m_camera.zoom;
                 float screenCY = (worldCY - m_camera.offsetY) * m_camera.zoom;
 
-                // Frustum cull — skip hexes entirely outside the window
                 if (screenCX + screenRadius < 0 || screenCX - screenRadius > m_windowW ||
                     screenCY + screenRadius < 0 || screenCY - screenRadius > m_windowH)
                     continue;
 
-                // Draw filled hex with terrain color
+                // Terrain fill
                 TerrainColor tc = getTerrainColor(plot.terrainType, plot.plotType);
                 drawFilledHex(screenCX, screenCY, screenRadius, tc.r, tc.g, tc.b);
 
-                // City marker (smaller hex in owner's color)
-                if (plot.isCity && screenRadius >= 2) {
-                    drawFilledHex(screenCX, screenCY, screenRadius * 0.35f,
-                                  plot.ownerColorR, plot.ownerColorG, plot.ownerColorB);
+                // Feature overlay (forest, jungle, etc.)
+                if (plot.featureType >= 0 && screenRadius >= 4) {
+                    drawFeatureOverlay(screenCX, screenCY, screenRadius, plot.featureType);
                 }
 
-                // Territory border: outline owned hexes that border a different owner
+                // River indicator (blue hex outline, slightly inset)
+                if (plot.isRiver && screenRadius >= 3) {
+                    drawHexOutline(screenCX, screenCY, screenRadius * 0.85f, 50, 100, 200);
+                }
+
+                // Territory border
                 if (plot.ownerID >= 0 && screenRadius >= 2) {
                     bool needBorder = false;
 
-                    // Check 4 cardinal neighbors for ownership change
                     if (x + 1 < snapshot.width && snapshot.getPlot(x + 1, y).ownerID != plot.ownerID)
                         needBorder = true;
                     if (x - 1 >= 0 && snapshot.getPlot(x - 1, y).ownerID != plot.ownerID)
@@ -183,7 +287,6 @@ void Renderer::draw(MapSnapshot& snapshot)
                     if (y - 1 >= 0 && snapshot.getPlot(x, y - 1).ownerID != plot.ownerID)
                         needBorder = true;
 
-                    // Also draw border at map edges
                     if (x == 0 || x == snapshot.width - 1 || y == 0 || y == snapshot.height - 1)
                         needBorder = true;
 
@@ -193,15 +296,51 @@ void Renderer::draw(MapSnapshot& snapshot)
                     }
                 }
 
-                // River indicator (blue hex outline, slightly inset)
-                if (plot.isRiver && screenRadius >= 3) {
-                    drawHexOutline(screenCX, screenCY, screenRadius * 0.85f, 50, 100, 200);
+                // City marker (smaller hex in owner's color)
+                if (plot.isCity && screenRadius >= 2) {
+                    drawFilledHex(screenCX, screenCY, screenRadius * 0.35f,
+                                  plot.ownerColorR, plot.ownerColorG, plot.ownerColorB);
                 }
             }
         }
 
-        // Draw HUD overlay
+        // --- Pass 2: Draw city name labels (on top of everything) ---
+        if (m_fontSmall && screenRadius >= 5) {
+            for (int y = 0; y < snapshot.height; y++) {
+                for (int x = 0; x < snapshot.width; x++) {
+                    const PlotData& plot = snapshot.getPlot(x, y);
+                    if (!plot.isCity || plot.cityName.empty()) continue;
+
+                    float worldCX, worldCY;
+                    hexCenter(x, y, snapshot.height, worldCX, worldCY);
+
+                    float screenCX = (worldCX - m_camera.offsetX) * m_camera.zoom;
+                    float screenCY = (worldCY - m_camera.offsetY) * m_camera.zoom;
+
+                    if (screenCX < -100 || screenCX > m_windowW + 100 ||
+                        screenCY < -50 || screenCY > m_windowH + 50)
+                        continue;
+
+                    // Draw city name below the hex
+                    float labelY = screenCY + screenRadius * 0.9f;
+
+                    // Dark background behind text for readability
+                    int tw = 0, th = 0;
+                    TTF_SizeText(m_fontSmall, plot.cityName.c_str(), &tw, &th);
+                    SDL_Rect bg = {(int)(screenCX - tw / 2 - 2), (int)(labelY - 1),
+                                   tw + 4, th + 2};
+                    SDL_SetRenderDrawColor(m_renderer, 0, 0, 0, 180);
+                    SDL_RenderFillRect(m_renderer, &bg);
+
+                    drawTextCentered(plot.cityName, (int)screenCX, (int)(labelY + th / 2),
+                                     m_fontSmall, 255, 255, 255);
+                }
+            }
+        }
+
+        // --- HUD and minimap ---
         drawHUD(snapshot);
+        drawMinimap(snapshot);
     }
 
     SDL_RenderPresent(m_renderer);
@@ -211,18 +350,103 @@ void Renderer::draw(MapSnapshot& snapshot)
 
 void Renderer::drawHUD(MapSnapshot& snapshot)
 {
-    // Dark background bar at the top
-    SDL_Rect hudBg = {0, 0, 200, 24};
-    SDL_SetRenderDrawColor(m_renderer, 0, 0, 0, 180);
+    // Dark semi-transparent bar at the top
+    SDL_Rect hudBg = {0, 0, 320, 28};
+    SDL_SetRenderDrawColor(m_renderer, 0, 0, 0, 200);
     SDL_RenderFillRect(m_renderer, &hudBg);
 
-    // Turn counter: one green dot per 10 turns (placeholder until SDL_ttf)
-    int dots = snapshot.gameTurn / 10;
-    for (int i = 0; i < std::min(dots, 20); i++) {
-        SDL_Rect dot = {4 + i * 9, 8, 7, 7};
-        SDL_SetRenderDrawColor(m_renderer, 0, 200, 0, 255);
-        SDL_RenderFillRect(m_renderer, &dot);
+    if (m_fontMedium) {
+        // Turn counter and year
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Turn %d  |  Year %d", snapshot.gameTurn, snapshot.gameYear);
+        drawText(buf, 8, 5, m_fontMedium, 200, 220, 200);
+    } else {
+        // Fallback: dot-based turn counter (no font loaded)
+        int dots = snapshot.gameTurn / 10;
+        for (int i = 0; i < std::min(dots, 20); i++) {
+            SDL_Rect dot = {4 + i * 9, 8, 7, 7};
+            SDL_SetRenderDrawColor(m_renderer, 0, 200, 0, 255);
+            SDL_RenderFillRect(m_renderer, &dot);
+        }
     }
+}
+
+// ---------- Minimap ----------
+
+void Renderer::drawMinimap(const MapSnapshot& snapshot)
+{
+    // Draw in bottom-right corner
+    int mmMaxW = 200;
+    int mmMaxH = 140;
+    int margin = 10;
+
+    // Calculate pixel-per-plot to fit the map in the minimap area
+    float scaleX = (float)mmMaxW / snapshot.width;
+    float scaleY = (float)mmMaxH / snapshot.height;
+    float scale = std::min(scaleX, scaleY);
+
+    int mmW = (int)(snapshot.width * scale);
+    int mmH = (int)(snapshot.height * scale);
+    int mmX = m_windowW - mmW - margin;
+    int mmY = m_windowH - mmH - margin;
+
+    // Dark background
+    SDL_Rect bg = {mmX - 2, mmY - 2, mmW + 4, mmH + 4};
+    SDL_SetRenderDrawColor(m_renderer, 0, 0, 0, 200);
+    SDL_RenderFillRect(m_renderer, &bg);
+
+    // Draw each plot as a small colored rectangle
+    for (int y = 0; y < snapshot.height; y++) {
+        for (int x = 0; x < snapshot.width; x++) {
+            const PlotData& plot = snapshot.getPlot(x, y);
+            TerrainColor tc = getTerrainColor(plot.terrainType, plot.plotType);
+
+            // Override color for cities/owned territory
+            uint8_t r = tc.r, g = tc.g, b = tc.b;
+            if (plot.isCity) {
+                r = plot.ownerColorR;
+                g = plot.ownerColorG;
+                b = plot.ownerColorB;
+            }
+
+            int flippedY = snapshot.height - 1 - y;
+            int px = mmX + (int)(x * scale);
+            int py = mmY + (int)(flippedY * scale);
+            int pw = std::max(1, (int)scale);
+            int ph = std::max(1, (int)scale);
+
+            SDL_Rect r2 = {px, py, pw, ph};
+            SDL_SetRenderDrawColor(m_renderer, r, g, b, 255);
+            SDL_RenderFillRect(m_renderer, &r2);
+        }
+    }
+
+    // Draw viewport rectangle (white outline showing current camera view)
+    // Convert screen corners to world coords, then to minimap coords
+    float worldLeft = m_camera.offsetX;
+    float worldTop = m_camera.offsetY;
+    float worldRight = m_camera.offsetX + m_windowW / m_camera.zoom;
+    float worldBottom = m_camera.offsetY + m_windowH / m_camera.zoom;
+
+    // Convert world coords to map grid coords (approximate)
+    float mapPixelW = (snapshot.width - 1) * COL_SPACING + HEX_WIDTH;
+    float mapPixelH = (snapshot.height - 1) * ROW_SPACING + HEX_HEIGHT + ROW_SPACING / 2.0f;
+
+    float vpLeft   = mmX + (worldLeft / mapPixelW) * mmW;
+    float vpTop    = mmY + (worldTop / mapPixelH) * mmH;
+    float vpRight  = mmX + (worldRight / mapPixelW) * mmW;
+    float vpBottom = mmY + (worldBottom / mapPixelH) * mmH;
+
+    // Clamp to minimap bounds
+    vpLeft   = std::max((float)mmX, std::min(vpLeft, (float)(mmX + mmW)));
+    vpTop    = std::max((float)mmY, std::min(vpTop, (float)(mmY + mmH)));
+    vpRight  = std::max((float)mmX, std::min(vpRight, (float)(mmX + mmW)));
+    vpBottom = std::max((float)mmY, std::min(vpBottom, (float)(mmY + mmH)));
+
+    SDL_SetRenderDrawColor(m_renderer, 255, 255, 255, 255);
+    SDL_Rect vp = {(int)vpLeft, (int)vpTop,
+                   (int)(vpRight - vpLeft), (int)(vpBottom - vpTop)};
+    SDL_RenderDrawRect(m_renderer, &vp);
 }
 
 // ---------- Input handling ----------
@@ -235,7 +459,6 @@ void Renderer::handleKeyDown(SDL_Keycode key, MapSnapshot& snapshot)
         case SDLK_LEFT:  case SDLK_a: m_keyLeft = true;  break;
         case SDLK_RIGHT: case SDLK_d: m_keyRight = true; break;
         case SDLK_f: case SDLK_HOME:
-            // Fit map to window
             {
                 std::lock_guard<std::mutex> lock(snapshot.mtx);
                 if (snapshot.width > 0 && snapshot.height > 0)
@@ -257,18 +480,15 @@ void Renderer::handleKeyUp(SDL_Keycode key)
 
 void Renderer::handleMouseWheel(int y, int mouseX, int mouseY)
 {
-    // Zoom toward/away from mouse cursor
     float oldZoom = m_camera.zoom;
 
     if (y > 0)
-        m_camera.zoom *= 1.15f;  // zoom in
+        m_camera.zoom *= 1.15f;
     else if (y < 0)
-        m_camera.zoom /= 1.15f;  // zoom out
+        m_camera.zoom /= 1.15f;
 
-    // Clamp zoom
     m_camera.zoom = std::max(0.1f, std::min(m_camera.zoom, 20.0f));
 
-    // Adjust offset so the point under the cursor stays fixed
     float worldMouseX = mouseX / oldZoom + m_camera.offsetX;
     float worldMouseY = mouseY / oldZoom + m_camera.offsetY;
     m_camera.offsetX = worldMouseX - mouseX / m_camera.zoom;

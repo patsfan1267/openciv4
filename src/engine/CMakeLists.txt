@@ -19,8 +19,8 @@ target_include_directories(engine PUBLIC
 # Engine needs to see gamecore headers (for CvGlobals, interface base classes, etc.)
 target_link_libraries(engine PUBLIC gamecore)
 
-# SDL2 headers for Renderer.cpp
-target_include_directories(engine PRIVATE "${SDL2_INCLUDE_DIR}")
+# SDL2 + SDL2_ttf headers for Renderer.cpp
+target_include_directories(engine PRIVATE "${SDL2_INCLUDE_DIR}" "${SDL2_TTF_INCLUDE_DIR}")
 
 # Python 2.4 headers needed transitively by CvDLLPythonIFaceBase.h
 set(PYTHON24_ROOT "C:/Civ4SDK/beyond-the-sword-sdk-develop/CvGameCoreDLL/Python24")

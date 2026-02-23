@@ -1,11 +1,14 @@
 #pragma once
-// Renderer — 2D hex-grid map renderer using SDL2
+// Renderer — 2D hex-grid map renderer using SDL2 + SDL2_ttf
 //
 // Renders the game map as colored hexagons with terrain colors,
-// city markers, territory borders, and river indicators.
+// city markers, territory borders, river indicators, city name
+// labels, feature overlays, HUD text, and a minimap.
 
 #include <SDL.h>
+#include <SDL_ttf.h>
 #include "MapSnapshot.h"
+#include <string>
 
 struct Camera {
     float offsetX = 0.0f;  // world-space offset (pixels at zoom=1)
@@ -16,6 +19,10 @@ struct Camera {
 class Renderer {
 public:
     Renderer(SDL_Renderer* sdlRenderer, int windowW, int windowH);
+    ~Renderer();
+
+    // Initialize font system (call once after construction)
+    bool initFonts(const char* fontPath);
 
     // Draw the map from the snapshot (locks the mutex briefly)
     void draw(MapSnapshot& snapshot);
@@ -39,7 +46,7 @@ private:
     // Hex geometry constants (at zoom=1)
     // Flat-top hexagon: width = 2*R, height = sqrt(3)*R
     // Column spacing = 1.5*R (3/4 of width), row spacing = sqrt(3)*R
-    // Even columns are offset down by half a row
+    // Odd columns are offset down by half a row
     static constexpr float HEX_RADIUS = 16.0f;      // center to vertex
     static constexpr float HEX_WIDTH = 2.0f * HEX_RADIUS;          // 32
     static constexpr float HEX_HEIGHT = 1.732050808f * HEX_RADIUS;  // ~27.7
@@ -55,5 +62,20 @@ private:
     void drawFilledHex(float cx, float cy, float radius, uint8_t r, uint8_t g, uint8_t b);
     void drawHexOutline(float cx, float cy, float radius, uint8_t r, uint8_t g, uint8_t b);
 
+    // Feature overlays (forests, jungle, etc.)
+    void drawFeatureOverlay(float cx, float cy, float radius, int featureType);
+
+    // Text rendering
+    TTF_Font* m_fontSmall = nullptr;   // 11pt — city labels
+    TTF_Font* m_fontMedium = nullptr;  // 14pt — HUD text
+    void drawText(const std::string& text, int x, int y, TTF_Font* font,
+                  uint8_t r, uint8_t g, uint8_t b);
+    void drawTextCentered(const std::string& text, int cx, int cy, TTF_Font* font,
+                          uint8_t r, uint8_t g, uint8_t b);
+
+    // HUD overlay
     void drawHUD(MapSnapshot& snapshot);
+
+    // Minimap
+    void drawMinimap(const MapSnapshot& snapshot);
 };

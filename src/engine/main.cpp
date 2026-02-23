@@ -20,6 +20,7 @@
 #include <windows.h>
 
 #include <SDL.h>
+#include <SDL_ttf.h>
 
 // Crash handler to print which turn/phase we were in when crashing
 static volatile int g_crashTurn = -1;
@@ -612,6 +613,11 @@ int main(int argc, char* argv[])
             fprintf(stderr, "[main] SDL_Init failed: %s\n", SDL_GetError());
             fprintf(stderr, "[main] Falling back to headless mode.\n");
             gameThreadFunc();
+        } else if (TTF_Init() != 0) {
+            fprintf(stderr, "[main] TTF_Init failed: %s\n", TTF_GetError());
+            fprintf(stderr, "[main] Falling back to headless mode.\n");
+            SDL_Quit();
+            gameThreadFunc();
         } else {
             int winW = 1280, winH = 720;
             SDL_Window* window = SDL_CreateWindow(
@@ -637,8 +643,9 @@ int main(int argc, char* argv[])
                 } else {
                     fprintf(stderr, "[main] SDL2 window created (%dx%d).\n", winW, winH);
 
-                    // Create renderer
+                    // Create renderer and load fonts
                     Renderer renderer(sdlRenderer, winW, winH);
+                    renderer.initFonts("assets/fonts/DejaVuSans.ttf");
 
                     // Start game on background thread
                     fprintf(stderr, "[main] Starting game thread...\n");
@@ -697,6 +704,7 @@ int main(int argc, char* argv[])
 
                     SDL_DestroyRenderer(sdlRenderer);
                     SDL_DestroyWindow(window);
+                    TTF_Quit();
                     SDL_Quit();
                     fprintf(stderr, "[main] SDL2 shutdown complete.\n");
                 }

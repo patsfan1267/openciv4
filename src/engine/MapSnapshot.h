@@ -65,9 +65,18 @@ struct PlotData {
     int firstUnitStrength = 0;  // combat strength (x100)
     bool firstUnitCanFound = false; // can this unit found a city?
     int improvementType = -1;   // ImprovementTypes (-1 = none)
+    int visibility = 2;         // 0=unseen, 1=revealed (fog), 2=currently visible
 
     // City details (populated when a city is selected)
     int cityID = -1;
+
+    // 3D rendering: building NIF path for first building in city (for M5)
+    std::string cityBuildingNIF;  // NIF path of a representative building (e.g., Palace)
+    float cityBuildingScale = 1.0f;
+
+    // 3D rendering: unit NIF path for first unit on plot (for M6)
+    std::string firstUnitNIF;    // NIF path (e.g., "Art/Units/Warrior/Warrior.nif")
+    float firstUnitNIFScale = 1.0f;
 };
 
 // ---------- Production/tech items for UI panels ----------

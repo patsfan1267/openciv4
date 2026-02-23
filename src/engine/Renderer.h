@@ -12,6 +12,7 @@
 #include <string>
 #include <functional>
 
+#define RENDERER_H_CAMERA_DEFINED
 struct Camera {
     float offsetX = 0.0f;
     float offsetY = 0.0f;

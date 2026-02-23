@@ -13,6 +13,7 @@ add_library(engine STATIC
     DDSLoader.cpp
     AssetManager.cpp
     NifLoader.cpp
+    Mesh.cpp
 )
 
 # glad (OpenGL loader) - compiled as C

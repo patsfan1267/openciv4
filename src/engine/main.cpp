@@ -207,6 +207,33 @@ static void updateMapSnapshot()
                 pd.cityPopulation = pCity->getPopulation();
                 pd.cityID = pCity->getID();
                 pd.cityName = wcharToStr(pCity->getName().GetCString());
+
+                // Find the most important building for 3D rendering
+                // Priority: Palace > Castle > other buildings
+                int bestPriority = -1;
+                for (int b = 0; b < GC.getNumBuildingInfos(); b++) {
+                    if (pCity->getNumBuilding((BuildingTypes)b) > 0) {
+                        const CvBuildingInfo& bi = GC.getBuildingInfo((BuildingTypes)b);
+                        const CvArtInfoBuilding* artInfo = bi.getArtInfo();
+                        if (artInfo && artInfo->getNIF() && artInfo->getNIF()[0] != '\0') {
+                            // Simple priority: Palace=100, Castle=50, others=1
+                            int priority = 1;
+                            BuildingClassTypes eClass = (BuildingClassTypes)bi.getBuildingClassType();
+                            if (eClass == (BuildingClassTypes)GC.getInfoTypeForString("BUILDINGCLASS_PALACE"))
+                                priority = 100;
+                            else if (eClass == (BuildingClassTypes)GC.getInfoTypeForString("BUILDINGCLASS_CASTLE"))
+                                priority = 50;
+                            else if (eClass == (BuildingClassTypes)GC.getInfoTypeForString("BUILDINGCLASS_WALLS"))
+                                priority = 40;
+
+                            if (priority > bestPriority) {
+                                bestPriority = priority;
+                                pd.cityBuildingNIF = artInfo->getNIF();
+                                pd.cityBuildingScale = artInfo->getScale();
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -225,10 +252,18 @@ static void updateMapSnapshot()
                     pd.firstUnitStrength = pUnit->baseCombatStr() * 100;
                     pd.firstUnitCanFound = pUnit->isFound();
 
-                    // Unit type name
+                    // Unit type name and 3D model info
                     UnitTypes eType = pUnit->getUnitType();
                     if (eType >= 0 && eType < GC.getNumUnitInfos()) {
                         pd.firstUnitName = wcharToStr(GC.getUnitInfo(eType).getDescription());
+
+                        // Get unit NIF path for 3D rendering
+                        const CvArtInfoUnit* pArtInfo = GC.getUnitInfo(eType).getArtInfo(
+                            0, NO_ERA, NO_UNIT_ARTSTYLE);
+                        if (pArtInfo && pArtInfo->getNIF() && pArtInfo->getNIF()[0] != '\0') {
+                            pd.firstUnitNIF = pArtInfo->getNIF();
+                            pd.firstUnitNIFScale = pArtInfo->getScale();
+                        }
                     }
 
                     // Check all units for human ownership
@@ -245,6 +280,17 @@ static void updateMapSnapshot()
                     }
                 }
             }
+        }
+
+        // Fog of war: visibility for human player's team
+        TeamTypes eHumanTeam = GET_PLAYER((PlayerTypes)HUMAN_PLAYER).getTeam();
+        if (eHumanTeam != NO_TEAM) {
+            if (pPlot->isVisible(eHumanTeam, false))
+                pd.visibility = 2; // currently visible
+            else if (pPlot->isRevealed(eHumanTeam, false))
+                pd.visibility = 1; // revealed but not currently visible (fog)
+            else
+                pd.visibility = 0; // never seen
         }
     }
 
@@ -1152,6 +1198,8 @@ int main(int argc, char* argv[])
     GC.getGameINLINE().setActivePlayer((PlayerTypes)HUMAN_PLAYER);
 
     // Reveal all plots for all teams
+    // TODO: For proper fog of war, remove this and only reveal starting areas.
+    // The renderer supports fog (visibility 0/1/2) but this workaround makes everything revealed.
     fprintf(stderr, "[main] Revealing all plots...\n");
     for (int i = 0; i < GC.getMapINLINE().numPlotsINLINE(); i++) {
         CvPlot* pPlot = GC.getMapINLINE().plotByIndexINLINE(i);
@@ -1311,7 +1359,8 @@ int main(int argc, char* argv[])
                                         break;
                                     case SDL_MOUSEMOTION:
                                         renderer.handleMouseMotion(event.motion.xrel, event.motion.yrel,
-                                            (event.motion.state & (SDL_BUTTON_MMASK | SDL_BUTTON_RMASK)) != 0);
+                                            (event.motion.state & SDL_BUTTON_RMASK) != 0,
+                                            (event.motion.state & SDL_BUTTON_MMASK) != 0);
                                         break;
                                     case SDL_WINDOWEVENT:
                                         if (event.window.event == SDL_WINDOWEVENT_RESIZED)

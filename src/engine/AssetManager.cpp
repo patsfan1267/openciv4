@@ -8,42 +8,83 @@
 #include "AssetManager.h"
 #include <cstdio>
 
+// Terrain and feature icon paths in the FPK
+struct TerrainIconMap { int terrainType; const char* fpkPath; };
+struct FeatureIconMap { int featureType; const char* fpkPath; };
+
+static TerrainIconMap terrainIcons[] = {
+    { 0, "art/interface/buttons/baseterrain/grassland.dds" },
+    { 1, "art/interface/buttons/baseterrain/plains.dds" },
+    { 2, "art/interface/buttons/baseterrain/desert.dds" },
+    { 3, "art/interface/buttons/baseterrain/tundra.dds" },
+    { 4, "art/interface/buttons/baseterrain/ice.dds" },
+    { 5, "art/interface/buttons/baseterrain/coast.dds" },
+    { 6, "art/interface/buttons/baseterrain/ocean.dds" },
+};
+
+static FeatureIconMap featureIcons[] = {
+    { 0, "art/interface/buttons/terrainfeatures/forest.dds" },
+    { 1, "art/interface/buttons/terrainfeatures/jungle.dds" },
+    { 2, "art/interface/buttons/terrainfeatures/oasis.dds" },
+    { 3, "art/interface/buttons/terrainfeatures/floodplains.dds" },
+    { 4, "art/interface/buttons/terrainfeatures/fallout.dds" },
+    { 5, "art/interface/buttons/terrainfeatures/forestevergreen.dds" },
+    { 6, "art/interface/buttons/terrainfeatures/forestsnowyevergreen.dds" },
+};
+
+// 512x512 seamless blend textures for map rendering
+// TERRAIN_GRASS=0, PLAINS=1, DESERT=2, TUNDRA=3, SNOW=4, COAST=5, OCEAN=6
+// Special: -1=PEAK, -2=HILL
+static TerrainIconMap terrainBlends[] = {
+    {  0, "art/terrain/textures/grassblend.dds" },
+    {  1, "art/terrain/textures/plainsblend.dds" },
+    {  2, "art/terrain/textures/desertblend.dds" },
+    {  3, "art/terrain/textures/tundrablend.dds" },
+    {  4, "art/terrain/textures/iceblend.dds" },
+    {  5, "art/terrain/textures/coastblend.dds" },
+    {  6, "art/terrain/textures/oceanblend.dds" },
+    { -1, "art/terrain/textures/peakblend.dds" },
+    { -2, "art/terrain/textures/hillblend.dds" },
+};
+
+// Feature blend textures
+static FeatureIconMap featureBlends[] = {
+    { 0, "art/terrain/textures/forestblend.dds" },
+    { 1, "art/terrain/textures/jungleblend.dds" },
+};
+
 AssetManager::~AssetManager() {
     for (auto& pair : m_terrainTextures)
         if (pair.second) SDL_DestroyTexture(pair.second);
     for (auto& pair : m_featureTextures)
         if (pair.second) SDL_DestroyTexture(pair.second);
+
+    for (auto& pair : m_terrainTexturesGL)
+        if (pair.second) glDeleteTextures(1, &pair.second);
+    for (auto& pair : m_featureTexturesGL)
+        if (pair.second) glDeleteTextures(1, &pair.second);
+    for (auto& pair : m_terrainBlendGL)
+        if (pair.second) glDeleteTextures(1, &pair.second);
+    for (auto& pair : m_featureBlendGL)
+        if (pair.second) glDeleteTextures(1, &pair.second);
 }
+
+bool AssetManager::openArt0(const char* btsInstallDir) {
+    std::string baseDir = std::string(btsInstallDir) + "/../Assets";
+    std::string fpkPath = baseDir + "/Art0.FPK";
+    fprintf(stderr, "[AssetManager] Opening FPK: %s\n", fpkPath.c_str());
+    if (!m_art0.open(fpkPath.c_str())) {
+        fprintf(stderr, "[AssetManager] WARNING: Could not open Art0.FPK\n");
+        return false;
+    }
+    return true;
+}
+
+// ---- SDL_Renderer path (legacy 2D) ----
 
 bool AssetManager::init(SDL_Renderer* renderer, const char* btsInstallDir) {
     m_renderer = renderer;
-
-    // Base game assets are one level up from BTS install
-    std::string baseDir = std::string(btsInstallDir) + "/../Assets";
-    std::string fpkPath = baseDir + "/Art0.FPK";
-
-    fprintf(stderr, "[AssetManager] Opening FPK: %s\n", fpkPath.c_str());
-    if (!m_art0.open(fpkPath.c_str())) {
-        fprintf(stderr, "[AssetManager] WARNING: Could not open Art0.FPK — using solid colors\n");
-        return false;
-    }
-
-    // Load terrain button icons (64x64 DDS)
-    // These map terrain type index → icon path in the FPK
-    struct TerrainIconMap {
-        int terrainType;
-        const char* fpkPath;
-    };
-
-    TerrainIconMap terrainIcons[] = {
-        { 0, "art/interface/buttons/baseterrain/grassland.dds" },  // TERRAIN_GRASS
-        { 1, "art/interface/buttons/baseterrain/plains.dds" },     // TERRAIN_PLAINS
-        { 2, "art/interface/buttons/baseterrain/desert.dds" },     // TERRAIN_DESERT
-        { 3, "art/interface/buttons/baseterrain/tundra.dds" },     // TERRAIN_TUNDRA
-        { 4, "art/interface/buttons/baseterrain/ice.dds" },        // TERRAIN_SNOW
-        { 5, "art/interface/buttons/baseterrain/coast.dds" },      // TERRAIN_COAST
-        { 6, "art/interface/buttons/baseterrain/ocean.dds" },      // TERRAIN_OCEAN
-    };
+    if (!openArt0(btsInstallDir)) return false;
 
     for (auto& entry : terrainIcons) {
         SDL_Texture* tex = loadTextureFromFPK(m_art0, entry.fpkPath);
@@ -53,34 +94,14 @@ bool AssetManager::init(SDL_Renderer* renderer, const char* btsInstallDir) {
         }
     }
 
-    // Load peak and hill textures (special plot type overrides)
-    // Use negative indices to distinguish from terrain types:
-    //   -1 = PLOT_PEAK, -2 = PLOT_HILLS
     SDL_Texture* peakTex = loadTextureFromFPK(m_art0, "art/interface/buttons/baseterrain/peak.dds");
     if (peakTex) m_terrainTextures[-1] = peakTex;
     SDL_Texture* hillTex = loadTextureFromFPK(m_art0, "art/interface/buttons/baseterrain/hill.dds");
     if (hillTex) m_terrainTextures[-2] = hillTex;
 
-    // Load feature icons
-    struct FeatureIconMap {
-        int featureType;
-        const char* fpkPath;
-    };
-    FeatureIconMap featureIcons[] = {
-        { 0, "art/interface/buttons/terrainfeatures/forest.dds" },        // FEATURE_FOREST
-        { 1, "art/interface/buttons/terrainfeatures/jungle.dds" },        // FEATURE_JUNGLE
-        { 2, "art/interface/buttons/terrainfeatures/oasis.dds" },         // FEATURE_OASIS
-        { 3, "art/interface/buttons/terrainfeatures/floodplains.dds" },   // FEATURE_FLOOD_PLAINS
-        { 4, "art/interface/buttons/terrainfeatures/fallout.dds" },       // FEATURE_FALLOUT
-        { 5, "art/interface/buttons/terrainfeatures/forestevergreen.dds" },       // FEATURE_FOREST_EVERGREEN (BTS addition, type varies by mod)
-        { 6, "art/interface/buttons/terrainfeatures/forestsnowyevergreen.dds" },  // snowy forest
-    };
-
     for (auto& entry : featureIcons) {
         SDL_Texture* tex = loadTextureFromFPK(m_art0, entry.fpkPath);
-        if (tex) {
-            m_featureTextures[entry.featureType] = tex;
-        }
+        if (tex) m_featureTextures[entry.featureType] = tex;
     }
 
     fprintf(stderr, "[AssetManager] Loaded %d terrain textures, %d feature textures\n",
@@ -101,10 +122,7 @@ SDL_Texture* AssetManager::getFeatureTexture(int featureType) const {
 SDL_Texture* AssetManager::createTextureFromRGBA(const uint8_t* pixels, int w, int h) {
     SDL_Texture* tex = SDL_CreateTexture(m_renderer, SDL_PIXELFORMAT_RGBA32,
                                          SDL_TEXTUREACCESS_STATIC, w, h);
-    if (!tex) {
-        fprintf(stderr, "[AssetManager] SDL_CreateTexture failed: %s\n", SDL_GetError());
-        return nullptr;
-    }
+    if (!tex) return nullptr;
     SDL_UpdateTexture(tex, nullptr, pixels, w * 4);
     SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
     return tex;
@@ -112,16 +130,312 @@ SDL_Texture* AssetManager::createTextureFromRGBA(const uint8_t* pixels, int w, i
 
 SDL_Texture* AssetManager::loadTextureFromFPK(const FPKArchive& fpk, const std::string& path) {
     auto ddsData = fpk.readFile(path);
+    if (ddsData.empty()) return nullptr;
+    DDSImage img;
+    if (!loadDDS(ddsData.data(), ddsData.size(), img)) return nullptr;
+    return createTextureFromRGBA(img.pixels.data(), img.width, img.height);
+}
+
+// ---- OpenGL path ----
+
+bool AssetManager::initGL(const char* btsInstallDir) {
+    if (!openArt0(btsInstallDir)) return false;
+
+    for (auto& entry : terrainIcons) {
+        GLuint tex = loadGLTextureFromFPK(entry.fpkPath);
+        if (tex) {
+            m_terrainTexturesGL[entry.terrainType] = tex;
+            fprintf(stderr, "[AssetManager] Loaded GL terrain %d: %s\n", entry.terrainType, entry.fpkPath);
+        }
+    }
+
+    GLuint peakTex = loadGLTextureFromFPK("art/interface/buttons/baseterrain/peak.dds");
+    if (peakTex) m_terrainTexturesGL[-1] = peakTex;
+    GLuint hillTex = loadGLTextureFromFPK("art/interface/buttons/baseterrain/hill.dds");
+    if (hillTex) m_terrainTexturesGL[-2] = hillTex;
+
+    for (auto& entry : featureIcons) {
+        GLuint tex = loadGLTextureFromFPK(entry.fpkPath);
+        if (tex) m_featureTexturesGL[entry.featureType] = tex;
+    }
+
+    fprintf(stderr, "[AssetManager] Loaded %d GL terrain textures, %d GL feature textures\n",
+            (int)m_terrainTexturesGL.size(), (int)m_featureTexturesGL.size());
+
+    // Load 512x512 blend textures for map rendering
+    for (auto& entry : terrainBlends) {
+        GLuint tex = loadGLTextureFromFPK(entry.fpkPath);
+        if (tex) {
+            m_terrainBlendGL[entry.terrainType] = tex;
+            fprintf(stderr, "[AssetManager] Loaded blend terrain %d: %s\n", entry.terrainType, entry.fpkPath);
+        }
+    }
+    for (auto& entry : featureBlends) {
+        GLuint tex = loadGLTextureFromFPK(entry.fpkPath);
+        if (tex) {
+            m_featureBlendGL[entry.featureType] = tex;
+            fprintf(stderr, "[AssetManager] Loaded blend feature %d: %s\n", entry.featureType, entry.fpkPath);
+        }
+    }
+    fprintf(stderr, "[AssetManager] Loaded %d blend terrain textures, %d blend feature textures\n",
+            (int)m_terrainBlendGL.size(), (int)m_featureBlendGL.size());
+
+    return true;
+}
+
+GLuint AssetManager::getTerrainTextureGL(int terrainType) const {
+    auto it = m_terrainTexturesGL.find(terrainType);
+    return (it != m_terrainTexturesGL.end()) ? it->second : 0;
+}
+
+GLuint AssetManager::getFeatureTextureGL(int featureType) const {
+    auto it = m_featureTexturesGL.find(featureType);
+    return (it != m_featureTexturesGL.end()) ? it->second : 0;
+}
+
+GLuint AssetManager::getTerrainBlendGL(int terrainType) const {
+    auto it = m_terrainBlendGL.find(terrainType);
+    return (it != m_terrainBlendGL.end()) ? it->second : 0;
+}
+
+GLuint AssetManager::getFeatureBlendGL(int featureType) const {
+    auto it = m_featureBlendGL.find(featureType);
+    return (it != m_featureBlendGL.end()) ? it->second : 0;
+}
+
+GLuint AssetManager::createGLTextureFromRGBA(const uint8_t* pixels, int w, int h) {
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    return tex;
+}
+
+GLuint AssetManager::loadGLTextureFromFPK(const std::string& path) {
+    DDSImage img;
+    if (!loadDDSFromFPK(path, img)) return 0;
+    return createGLTextureFromRGBA(img.pixels.data(), img.width, img.height);
+}
+
+bool AssetManager::loadDDSFromFPK(const std::string& path, DDSImage& out) {
+    auto ddsData = m_art0.readFile(path);
     if (ddsData.empty()) {
         fprintf(stderr, "[AssetManager] File not found in FPK: %s\n", path.c_str());
-        return nullptr;
+        return false;
     }
-
-    DDSImage img;
-    if (!loadDDS(ddsData.data(), ddsData.size(), img)) {
+    if (!loadDDS(ddsData.data(), ddsData.size(), out)) {
         fprintf(stderr, "[AssetManager] DDS decode failed: %s\n", path.c_str());
+        return false;
+    }
+    return true;
+}
+
+// ---- 3D Model loading (NIF → GPU Mesh) ----
+
+#include "NifLoader.h"
+#include <algorithm>
+
+// Helper: lowercase a string
+static std::string toLower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c){ return (char)tolower(c); });
+    return s;
+}
+
+// Helper: extract directory from a path (e.g., "art/foo/bar.nif" → "art/foo/")
+static std::string pathDir(const std::string& path) {
+    size_t pos = path.find_last_of("/\\");
+    return (pos != std::string::npos) ? path.substr(0, pos + 1) : "";
+}
+
+// Helper: normalize path separators to forward slash and lowercase
+static std::string normalizePath(const std::string& path) {
+    std::string out = path;
+    for (char& c : out) { if (c == '\\') c = '/'; }
+    return toLower(out);
+}
+
+GLuint AssetManager::resolveNifTexture(const std::string& nifDir, const std::string& texName) {
+    if (texName.empty()) return 0;
+
+    // Build candidate paths: relative to NIF directory, then absolute
+    std::string normalizedName = normalizePath(texName);
+    std::string normalizedDir = normalizePath(nifDir);
+
+    // Try: nifDir + texName, then texName alone, then with .dds extension
+    std::string candidates[4];
+    int numCandidates = 0;
+
+    candidates[numCandidates++] = normalizedDir + normalizedName;
+    candidates[numCandidates++] = normalizedName;
+
+    // Try .dds if the original was .tga or had no extension
+    size_t dotPos = normalizedName.find_last_of('.');
+    if (dotPos != std::string::npos) {
+        std::string withDds = normalizedName.substr(0, dotPos) + ".dds";
+        candidates[numCandidates++] = normalizedDir + withDds;
+        candidates[numCandidates++] = withDds;
+    }
+
+    for (int i = 0; i < numCandidates; i++) {
+        // Check cache
+        auto it = m_nifTextureCache.find(candidates[i]);
+        if (it != m_nifTextureCache.end()) return it->second;
+
+        // Try to load from FPK
+        GLuint tex = loadGLTextureFromFPK(candidates[i]);
+        if (tex) {
+            m_nifTextureCache[candidates[i]] = tex;
+            return tex;
+        }
+    }
+
+    return 0;
+}
+
+Mesh* AssetManager::getModel(const std::string& nifPath) {
+    std::string key = normalizePath(nifPath);
+
+    // Check cache
+    auto it = m_modelCache.find(key);
+    if (it != m_modelCache.end()) return it->second.get();
+
+    // Load NIF from FPK
+    auto nifData = m_art0.readFile(key);
+    if (nifData.empty()) {
+        // Also try with "art/" prefix if not present
+        if (key.find("art/") != 0) {
+            nifData = m_art0.readFile("art/" + key);
+        }
+        if (nifData.empty()) {
+            fprintf(stderr, "[AssetManager] NIF not found in FPK: %s\n", key.c_str());
+            m_modelCache[key] = nullptr;
+            return nullptr;
+        }
+    }
+
+    auto nif = nif::loadNif(nifData.data(), nifData.size());
+    if (!nif) {
+        fprintf(stderr, "[AssetManager] NIF parse failed: %s\n", key.c_str());
+        m_modelCache[key] = nullptr;
         return nullptr;
     }
 
-    return createTextureFromRGBA(img.pixels.data(), img.width, img.height);
+    std::string nifDir = pathDir(key);
+    auto mesh = std::make_unique<Mesh>();
+
+    // Walk scene graph to find all renderable meshes
+    for (auto& blockPtr : nif->blocks) {
+        auto* triShape = dynamic_cast<nif::NiTriShapeBlock*>(blockPtr.get());
+        auto* triStrips = dynamic_cast<nif::NiTriStripsBlock*>(blockPtr.get());
+
+        nif::NiGeometryBlock* geom = triShape ? (nif::NiGeometryBlock*)triShape
+                                              : (nif::NiGeometryBlock*)triStrips;
+        if (!geom) continue;
+
+        // Get geometry data
+        nif::NiGeometryDataCommon* geoData = nullptr;
+        nif::NiTriShapeDataBlock* triData = nullptr;
+        nif::NiTriStripsDataBlock* stripsData = nullptr;
+
+        if (triShape) {
+            triData = nif->getBlock<nif::NiTriShapeDataBlock>(geom->dataRef);
+            geoData = triData;
+        } else {
+            stripsData = nif->getBlock<nif::NiTriStripsDataBlock>(geom->dataRef);
+            geoData = stripsData;
+        }
+
+        if (!geoData || geoData->numVertices == 0) continue;
+
+        // Build vertex array
+        std::vector<MeshVertex> vertices(geoData->numVertices);
+        for (int i = 0; i < geoData->numVertices; i++) {
+            MeshVertex& v = vertices[i];
+            if (geoData->hasVertices && i < (int)geoData->vertices.size()) {
+                v.px = geoData->vertices[i].x;
+                v.py = geoData->vertices[i].y;
+                v.pz = geoData->vertices[i].z;
+            }
+            if (geoData->hasNormals && i < (int)geoData->normals.size()) {
+                v.nx = geoData->normals[i].x;
+                v.ny = geoData->normals[i].y;
+                v.nz = geoData->normals[i].z;
+            }
+            if (geoData->uvSetCount() > 0 && !geoData->uvSets.empty() &&
+                i < (int)geoData->uvSets[0].size()) {
+                v.u = geoData->uvSets[0][i].x;
+                v.v = geoData->uvSets[0][i].y;
+            }
+        }
+
+        // Build index array
+        std::vector<uint16_t> indices;
+        if (triData && triData->hasTriangles) {
+            indices.reserve(triData->triangles.size() * 3);
+            for (auto& t : triData->triangles) {
+                indices.push_back(t.v0);
+                indices.push_back(t.v1);
+                indices.push_back(t.v2);
+            }
+        } else if (stripsData) {
+            auto tris = stripsData->toTriangleList();
+            indices.reserve(tris.size() * 3);
+            for (auto& t : tris) {
+                indices.push_back(t.v0);
+                indices.push_back(t.v1);
+                indices.push_back(t.v2);
+            }
+        }
+
+        if (indices.empty()) continue;
+
+        // Find texture and material properties
+        GLuint texID = 0;
+        float diffR = 0.8f, diffG = 0.8f, diffB = 0.8f, alpha = 1.0f;
+        bool hasAlpha = false;
+
+        for (auto propRef : geom->propertyRefs) {
+            auto* texProp = nif->getBlock<nif::NiTexturingPropertyBlock>(propRef);
+            if (texProp && texProp->hasTexture[0]) {  // Base texture (slot 0)
+                auto* srcTex = nif->getBlock<nif::NiSourceTextureBlock>(texProp->textures[0].sourceRef);
+                if (srcTex && srcTex->useExternal && !srcTex->fileName.empty()) {
+                    texID = resolveNifTexture(nifDir, srcTex->fileName);
+                }
+            }
+
+            auto* matProp = nif->getBlock<nif::NiMaterialPropertyBlock>(propRef);
+            if (matProp) {
+                diffR = matProp->diffuse.r;
+                diffG = matProp->diffuse.g;
+                diffB = matProp->diffuse.b;
+                alpha = matProp->alpha;
+            }
+
+            auto* alphaProp = nif->getBlock<nif::NiAlphaPropertyBlock>(propRef);
+            if (alphaProp && alphaProp->blendEnabled()) {
+                hasAlpha = true;
+            }
+        }
+
+        mesh->addSubmesh(vertices, indices, texID, diffR, diffG, diffB, alpha, hasAlpha);
+    }
+
+    if (mesh->empty()) {
+        fprintf(stderr, "[AssetManager] NIF has no renderable geometry: %s\n", key.c_str());
+        m_modelCache[key] = nullptr;
+        return nullptr;
+    }
+
+    fprintf(stderr, "[AssetManager] Loaded 3D model: %s (%d submeshes)\n",
+            key.c_str(), mesh->submeshCount());
+
+    Mesh* ptr = mesh.get();
+    m_modelCache[key] = std::move(mesh);
+    return ptr;
 }

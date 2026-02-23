@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(OpenCiv4 LANGUAGES CXX)
+project(OpenCiv4 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -55,12 +55,15 @@ add_subdirectory(src/gamecore)
 
 # --- Main executable ---
 add_executable(openciv4 src/engine/main.cpp)
-target_link_libraries(openciv4 PRIVATE engine gamecore winmm
+target_link_libraries(openciv4 PRIVATE engine gamecore glad winmm opengl32
     "${SDL2_LIB_DIR}/SDL2.lib"
     "${SDL2_LIB_DIR}/SDL2main.lib"
     "${SDL2_TTF_LIB_DIR}/SDL2_ttf.lib"
 )
-target_include_directories(openciv4 PRIVATE "${SDL2_INCLUDE_DIR}" "${SDL2_TTF_INCLUDE_DIR}")
+target_include_directories(openciv4 PRIVATE
+    "${SDL2_INCLUDE_DIR}" "${SDL2_TTF_INCLUDE_DIR}"
+    "${CMAKE_SOURCE_DIR}/third_party/glad"
+)
 target_link_options(openciv4 PRIVATE /MAP /SUBSYSTEM:CONSOLE)
 
 # main.cpp includes CvGameCoreDLL.h which needs these defines

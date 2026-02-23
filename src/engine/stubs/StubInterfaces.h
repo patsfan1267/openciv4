@@ -17,6 +17,7 @@
 #include <cstring>
 #include <vector>
 #include <string>
+#include <unordered_map>
 
 // Pull in the original Firaxis interface base classes.
 // These are found via the include path pointing at the gamecore SDK headers.
@@ -737,6 +738,9 @@ public:
     StubPythonIFace       m_pythonIFace;
     StubEventReporterIFace m_eventReporterIFace;
 
+    // Text translation table: TXT_KEY_* → English text
+    std::unordered_map<std::wstring, std::wstring> m_textMap;
+
     // ---- Sub-interface accessors ----
     CvDLLEntityIFaceBase* getEntityIFace() override { return &m_entityIFace; } // STUB
     CvDLLInterfaceIFaceBase* getInterfaceIFace() override { return &m_interfaceIFace; } // STUB
@@ -930,10 +934,71 @@ public:
     void setSymbolID(int iID, int iValue) override {} // STUB
 
     // ---- Text / localization ----
-    CvWString getText(CvWString szIDTag, ...) override { return szIDTag; } // Return raw key
-    CvWString getObjectText(CvWString szIDTag, uint uiForm, bool bNoSubs) override { return szIDTag; } // Return raw key
-    void addText(const TCHAR* szIDTag, const wchar* szString, const wchar* szGender, const wchar* szPlural) override {} // STUB
-    uint getNumForms(CvWString szIDTag) override { return 0; } // STUB
+    // Strip BTS format markers from translated text.
+    // The real engine substitutes variadic args (%s1, %d2, etc.) — we just remove them.
+    static std::wstring stripBtsFormatMarkers(const std::wstring& src) {
+        std::wstring out;
+        out.reserve(src.size());
+        for (size_t i = 0; i < src.size(); ++i) {
+            if (src[i] == L'%') {
+                // %% → literal %
+                if (i + 1 < src.size() && src[i + 1] == L'%') {
+                    out += L'%';
+                    ++i;
+                    continue;
+                }
+                // %[dDsS][0-9]+ with optional _suffix and trailing %%
+                if (i + 1 < src.size() && (src[i+1] == L'd' || src[i+1] == L'D' ||
+                                            src[i+1] == L's' || src[i+1] == L'S')) {
+                    size_t j = i + 2;
+                    // Skip digits (parameter index)
+                    while (j < src.size() && iswdigit(src[j])) ++j;
+                    if (j > i + 2) {
+                        // Skip optional _Suffix (like _Change, _Bonus, etc.)
+                        if (j < src.size() && src[j] == L'_') {
+                            ++j;
+                            while (j < src.size() && iswalpha(src[j])) ++j;
+                        }
+                        // Skip trailing %% (used for percentage display)
+                        if (j + 1 < src.size() && src[j] == L'%' && src[j+1] == L'%') j += 2;
+                        i = j - 1; // skip entire marker
+                        continue;
+                    }
+                }
+                // Unknown % pattern — keep it
+                out += L'%';
+            } else {
+                out += src[i];
+            }
+        }
+        return out;
+    }
+
+    CvWString getText(CvWString szIDTag, ...) override {
+        auto it = m_textMap.find(std::wstring(szIDTag.c_str()));
+        if (it != m_textMap.end()) {
+            std::wstring clean = stripBtsFormatMarkers(it->second);
+            return CvWString(clean.c_str());
+        }
+        return szIDTag;
+    }
+    CvWString getObjectText(CvWString szIDTag, uint uiForm, bool bNoSubs) override {
+        auto it = m_textMap.find(std::wstring(szIDTag.c_str()));
+        if (it != m_textMap.end()) {
+            std::wstring clean = stripBtsFormatMarkers(it->second);
+            return CvWString(clean.c_str());
+        }
+        return szIDTag;
+    }
+    void addText(const TCHAR* szIDTag, const wchar* szString, const wchar* szGender, const wchar* szPlural) override {
+        if (szIDTag && szString) {
+            // Convert narrow TCHAR key to wide string
+            std::wstring key;
+            for (const TCHAR* p = szIDTag; *p; ++p) key += (wchar_t)*p;
+            m_textMap[key] = std::wstring(szString);
+        }
+    }
+    uint getNumForms(CvWString szIDTag) override { return 1; }
 
     // ---- World / frame ----
     WorldSizeTypes getWorldSize() override { return (WorldSizeTypes)0; } // STUB
@@ -955,7 +1020,67 @@ public:
     bool isGameInitializing() override { return false; } // STUB
 
     // ---- File enumeration ----
-    void enumerateFiles(std::vector<CvString>& files, const char* szPattern) override {} // STUB
+    void enumerateFiles(std::vector<CvString>& files, const char* szPattern) override {
+        // Search all 3 asset layers: BTS, Warlords, Base
+        std::string bts = BTS_INSTALL_DIR;
+        if (!bts.empty() && bts.back() != '/' && bts.back() != '\\') bts += '/';
+        // Derive parent dir (install root) from BTS path
+        std::string parent = bts;
+        // Remove trailing "Beyond the Sword/" to get install root
+        if (parent.size() > 20) {
+            auto pos = parent.rfind("Beyond the Sword");
+            if (pos != std::string::npos) parent = parent.substr(0, pos);
+        }
+
+        // Normalize pattern separators to OS-native backslash for FindFirstFile
+        std::string pat(szPattern);
+        for (auto& c : pat) { if (c == '/') c = '\\'; }
+
+        // Also build a forward-slash version for the relative path we store
+        std::string patFwd(szPattern);
+        for (auto& c : patFwd) { if (c == '\\') c = '/'; }
+        // Get directory portion of relative path (e.g. "xml/text/")
+        std::string relDir;
+        auto lastSlash = patFwd.rfind('/');
+        if (lastSlash != std::string::npos) relDir = patFwd.substr(0, lastSlash + 1);
+
+        // LoadCivXml prepends "Assets//" when fileManagerEnabled()==false,
+        // then ResolveXmlPath prepends BTS_INSTALL_DIR.
+        // So we return just the relative path e.g. "xml/text/filename.xml"
+        std::string searchRoots[3] = {
+            bts + "Assets/",            // Beyond the Sword
+            parent + "Warlords/Assets/", // Warlords
+            parent + "Assets/",          // Base game
+        };
+
+        // Track which filenames we've already added (avoid duplicates across layers)
+        std::unordered_map<std::string, bool> seen;
+
+        for (const auto& root : searchRoots) {
+            std::string searchPath = root + pat;
+            // Normalize to backslashes for Windows API
+            for (auto& c : searchPath) { if (c == '/') c = '\\'; }
+
+            WIN32_FIND_DATAA fd;
+            HANDLE hFind = FindFirstFileA(searchPath.c_str(), &fd);
+            if (hFind == INVALID_HANDLE_VALUE) continue;
+            do {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                std::string fname(fd.cFileName);
+                std::string lower = fname;
+                for (auto& c : lower) c = (char)tolower((unsigned char)c);
+                if (seen.count(lower)) continue;
+                seen[lower] = true;
+                // Return relative path WITHOUT "Assets/" prefix
+                // LoadCivXml will prepend "Assets//" itself
+                std::string relFile = relDir + fname;
+                files.push_back(CvString(relFile.c_str()));
+            } while (FindNextFileA(hFind, &fd));
+            FindClose(hFind);
+        }
+        fprintf(stderr, "[enumerateFiles] pattern='%s' found %d files\n",
+                szPattern, (int)files.size());
+    }
     void enumerateModuleFiles(std::vector<CvString>& aszFiles, const CvString& refcstrRootDirectory, const CvString& refcstrModularDirectory, const CvString& refcstrExtension, bool bSearchSubdirectories) override {} // STUB
 
     // ---- Save / Load ----

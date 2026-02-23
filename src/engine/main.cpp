@@ -886,8 +886,11 @@ int main(int argc, char* argv[])
         xml.SetPostGlobalsGlobalDefines();
         fprintf(stderr, "[main]   LoadPostMenuGlobals...\n");
         xml.LoadPostMenuGlobals();
+        fprintf(stderr, "[main]   LoadGlobalText...\n");
+        xml.LoadGlobalText();
     }
-    fprintf(stderr, "[main] XML loading complete.\n\n");
+    fprintf(stderr, "[main] XML loading complete. Text entries: %zu\n\n",
+            stubDLL.m_textMap.size());
 
     // ---- Step 5: Configure game settings via CvInitCore ----
     fprintf(stderr, "[main] Configuring game...\n");

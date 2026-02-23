@@ -1,8 +1,8 @@
 #pragma once
 // Renderer — 2D hex-grid map renderer using SDL2
 //
-// Reads from a MapSnapshot (thread-safe via mutex) and draws the map
-// as colored rectangles (Milestone 2) or hexagons (Milestone 3).
+// Renders the game map as colored hexagons with terrain colors,
+// city markers, territory borders, and river indicators.
 
 #include <SDL.h>
 #include "MapSnapshot.h"
@@ -24,7 +24,7 @@ public:
     void handleKeyDown(SDL_Keycode key, MapSnapshot& snapshot);
     void handleKeyUp(SDL_Keycode key);
     void handleMouseWheel(int y, int mouseX, int mouseY);
-    void handleMouseMotion(int dx, int dy, bool middleButtonDown);
+    void handleMouseMotion(int dx, int dy, bool anyDragButton);
     void handleResize(int newW, int newH);
 
 private:
@@ -36,12 +36,24 @@ private:
     bool m_keyUp = false, m_keyDown = false, m_keyLeft = false, m_keyRight = false;
     float m_panSpeed = 400.0f; // pixels per second at zoom=1
 
-    // Tile size in pixels (at zoom=1)
-    static constexpr float TILE_SIZE = 24.0f;
+    // Hex geometry constants (at zoom=1)
+    // Flat-top hexagon: width = 2*R, height = sqrt(3)*R
+    // Column spacing = 1.5*R (3/4 of width), row spacing = sqrt(3)*R
+    // Even columns are offset down by half a row
+    static constexpr float HEX_RADIUS = 16.0f;      // center to vertex
+    static constexpr float HEX_WIDTH = 2.0f * HEX_RADIUS;          // 32
+    static constexpr float HEX_HEIGHT = 1.732050808f * HEX_RADIUS;  // ~27.7
+    static constexpr float COL_SPACING = 1.5f * HEX_RADIUS;        // 24
+    static constexpr float ROW_SPACING = HEX_HEIGHT;               // ~27.7
 
     // Auto-fit camera on first frame with valid map data
     bool m_cameraInitialized = false;
     void autoFitCamera(const MapSnapshot& snapshot);
+
+    // Hex drawing helpers
+    void hexCenter(int col, int row, int mapHeight, float& cx, float& cy) const;
+    void drawFilledHex(float cx, float cy, float radius, uint8_t r, uint8_t g, uint8_t b);
+    void drawHexOutline(float cx, float cy, float radius, uint8_t r, uint8_t g, uint8_t b);
 
     void drawHUD(MapSnapshot& snapshot);
 };

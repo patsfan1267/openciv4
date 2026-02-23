@@ -21,7 +21,7 @@ public:
 	{
 		FAssertMsg(eTeam != NO_TEAM, "eTeam is not assigned a valid value");
 		FAssertMsg(eTeam < MAX_TEAMS, "eTeam is not assigned a valid value");
-		return m_aTeams[eTeam]; 
+		return m_aTeams[eTeam];
 	}
 #endif
 	DllExport static CvTeamAI& getTeamNonInl(TeamTypes eTeam);

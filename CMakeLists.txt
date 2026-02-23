@@ -46,6 +46,7 @@ add_subdirectory(src/gamecore)
 # --- Main executable ---
 add_executable(openciv4 src/engine/main.cpp)
 target_link_libraries(openciv4 PRIVATE engine gamecore winmm)
+target_link_options(openciv4 PRIVATE /MAP)
 
 # main.cpp includes CvGameCoreDLL.h which needs these defines
 target_compile_definitions(openciv4 PRIVATE

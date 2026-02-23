@@ -69,16 +69,21 @@ void CvUnitAI::AI_reset(UnitAITypes eUnitAI)
 }
 
 // AI_update returns true when we should abort the loop and wait until next slice
+// OpenCiv4: sub-phase tracking for crash diagnostics (defined in main.cpp)
+extern volatile int g_crashSubPhase;
+
 bool CvUnitAI::AI_update()
 {
 	PROFILE_FUNC();
 
 	CvUnit* pTransportUnit;
 
+	g_crashSubPhase = 10; // entered AI_update
 	FAssertMsg(canMove(), "canMove is expected to be true");
 	FAssertMsg(isGroupHead(), "isGroupHead is expected to be true"); // XXX is this a good idea???
 
 	// allow python to handle it
+	g_crashSubPhase = 11; // python callback
 	CyUnit* pyUnit = new CyUnit(this);
 	CyArgsList argsList;
 	argsList.add(gDLL->getPythonIFace()->makePythonObject(pyUnit));	// pass in unit class
@@ -90,6 +95,7 @@ bool CvUnitAI::AI_update()
 		return false;
 	}
 
+	g_crashSubPhase = 12; // domain/plot check
 	if (getDomainType() == DOMAIN_LAND)
 	{
 		if (plot()->isWater() && !canMoveAllTerrain())
@@ -112,11 +118,13 @@ bool CvUnitAI::AI_update()
 		}
 	}
 
+	g_crashSubPhase = 13; // AI_afterAttack
 	if (AI_afterAttack())
 	{
 		return false;
 	}
 
+	g_crashSubPhase = 14; // AI type dispatch
 	if (getGroup()->isAutomated())
 	{
 		switch (getGroup()->getAutomateType())
@@ -212,6 +220,7 @@ bool CvUnitAI::AI_update()
 	}
 	else
 	{
+		g_crashSubPhase = 100 + (int)AI_getUnitAIType(); // 100+type for dispatch tracking
 		switch (AI_getUnitAIType())
 		{
 		case UNITAI_UNKNOWN:
@@ -1085,26 +1094,46 @@ void CvUnitAI::AI_settleMove()
 {
 	PROFILE_FUNC();
 
+	g_crashSubPhase = 200; // settleMove: entry
 	if (GET_PLAYER(getOwnerINLINE()).getNumCities() == 0)
 	{
-		if (canFound(plot()))
+		g_crashSubPhase = 201; // settleMove: canFound check
+		CvPlot* pMyPlot = plot();
+		if (pMyPlot == NULL)
 		{
-			getGroup()->pushMission(MISSION_FOUND);
+			fprintf(stderr, "  [CRASH-DBG] AI_settleMove: plot() is NULL! unit=%d owner=%d xy=(%d,%d)\n",
+					getID(), getOwnerINLINE(), getX_INLINE(), getY_INLINE());
+			getGroup()->pushMission(MISSION_SKIP);
 			return;
 		}
+		fprintf(stderr, "  [TRACE] AI_settleMove: calling canFound (numCities==0)\n"); fflush(stderr);
+		if (canFound(pMyPlot))
+		{
+			fprintf(stderr, "  [TRACE] AI_settleMove: canFound returned true, calling pushMission\n"); fflush(stderr);
+			g_crashSubPhase = 500; // settleMove: pushMission FOUND
+			getGroup()->pushMission(MISSION_FOUND);
+			fprintf(stderr, "  [TRACE] AI_settleMove: pushMission done\n"); fflush(stderr);
+			g_crashSubPhase = 501; // settleMove: after pushMission FOUND
+			return;
+		}
+		fprintf(stderr, "  [TRACE] AI_settleMove: canFound returned false\n"); fflush(stderr);
 	}
-	
+
+	g_crashSubPhase = 700; // settleMove: AI_getPlotDanger
 	int iDanger = GET_PLAYER(getOwnerINLINE()).AI_getPlotDanger(plot(), 3);
-	
+	g_crashSubPhase = 701; // settleMove: after AI_getPlotDanger
+
 	if (iDanger > 0)
 	{
 		if ((plot()->getOwnerINLINE() == getOwnerINLINE()) || (iDanger > 2))
 		{
 			joinGroup(NULL);
+			g_crashSubPhase = 203; // settleMove: retreatToCity (danger)
 			if (AI_retreatToCity())
 			{
 				return;
 			}
+			g_crashSubPhase = 204; // settleMove: AI_safety (danger)
 			if (AI_safety())
 			{
 				return;
@@ -1113,28 +1142,45 @@ void CvUnitAI::AI_settleMove()
 		}
 	}
 
+	g_crashSubPhase = 710; // settleMove: city sites loop
 	int iAreaBestFoundValue = 0;
 	int iOtherBestFoundValue = 0;
 
-	for (int iI = 0; iI < GET_PLAYER(getOwnerINLINE()).AI_getNumCitySites(); iI++)
+	g_crashSubPhase = 711; // settleMove: getNumCitySites
+	int numSites = GET_PLAYER(getOwnerINLINE()).AI_getNumCitySites();
+	g_crashSubPhase = 712; // settleMove: got numSites
+
+	for (int iI = 0; iI < numSites; iI++)
 	{
+		g_crashSubPhase = 713; // settleMove: getCitySite
 		CvPlot* pCitySitePlot = GET_PLAYER(getOwnerINLINE()).AI_getCitySite(iI);
+		if (pCitySitePlot == NULL) continue;
+		g_crashSubPhase = 714; // settleMove: getArea compare
 		if (pCitySitePlot->getArea() == getArea())
 		{
+			g_crashSubPhase = 715; // settleMove: plot compare
 			if (plot() == pCitySitePlot)
 			{
+				g_crashSubPhase = 716; // settleMove: canFound(plot) in sites loop
+				fprintf(stderr, "  [TRACE] AI_settleMove: calling canFound (sites loop)\n"); fflush(stderr);
 				if (canFound(plot()))
 				{
+					fprintf(stderr, "  [TRACE] AI_settleMove: canFound returned true (sites loop)\n"); fflush(stderr);
+					g_crashSubPhase = 717; // settleMove: pushMission FOUND (sites loop)
 					getGroup()->pushMission(MISSION_FOUND);
-					return;					
+					return;
 				}
 			}
+			g_crashSubPhase = 718; // settleMove: getFoundValue
 			iAreaBestFoundValue = std::max(iAreaBestFoundValue, pCitySitePlot->getFoundValue(getOwnerINLINE()));
+			g_crashSubPhase = 719; // settleMove: after getFoundValue
 
 		}
 		else
 		{
+			g_crashSubPhase = 720; // settleMove: getFoundValue (other)
 			iOtherBestFoundValue = std::max(iOtherBestFoundValue, pCitySitePlot->getFoundValue(getOwnerINLINE()));
+			g_crashSubPhase = 721; // settleMove: after getFoundValue (other)
 		}
 	}
 	
@@ -1167,17 +1213,30 @@ void CvUnitAI::AI_settleMove()
 		}
 	}
 	
-	if ((iAreaBestFoundValue > 0) && plot()->isBestAdjacentFound(getOwnerINLINE()))
+	g_crashSubPhase = 730; // settleMove: bestAdjacentFound check
+	if (iAreaBestFoundValue > 0)
 	{
-		if (canFound(plot()))
+		g_crashSubPhase = 731; // settleMove: isBestAdjacentFound
+		bool bBestAdj = plot()->isBestAdjacentFound(getOwnerINLINE());
+		g_crashSubPhase = 732; // settleMove: after isBestAdjacentFound
+		if (bBestAdj)
 		{
-			getGroup()->pushMission(MISSION_FOUND);
-			return;
+			g_crashSubPhase = 733; // settleMove: canFound (bestAdj)
+			fprintf(stderr, "  [TRACE] AI_settleMove: calling canFound (bestAdj)\n"); fflush(stderr);
+			if (canFound(plot()))
+			{
+				fprintf(stderr, "  [TRACE] AI_settleMove: canFound returned true (bestAdj)\n"); fflush(stderr);
+				g_crashSubPhase = 734; // settleMove: pushMission FOUND (bestAdj)
+				getGroup()->pushMission(MISSION_FOUND);
+				return;
+			}
 		}
 	}
 
+	g_crashSubPhase = 740; // settleMove: peace/defend check
 	if (!GC.getGameINLINE().isOption(GAMEOPTION_ALWAYS_PEACE) && !GC.getGameINLINE().isOption(GAMEOPTION_AGGRESSIVE_AI) && !getGroup()->canDefend())
 	{
+		g_crashSubPhase = 208; // settleMove: retreatToCity (no defense)
 		if (AI_retreatToCity())
 		{
 			return;
@@ -1197,14 +1256,18 @@ void CvUnitAI::AI_settleMove()
 		}
 	}
 
+	g_crashSubPhase = 750; // settleMove: AI_found
 	if (iAreaBestFoundValue > 0)
 	{
+		g_crashSubPhase = 751; // settleMove: calling AI_found
 		if (AI_found())
 		{
 			return;
 		}
+		g_crashSubPhase = 752; // settleMove: after AI_found
 	}
 
+	g_crashSubPhase = 760; // settleMove: AI_load settler sea
 	if (plot()->getOwnerINLINE() == getOwnerINLINE())
 	{
 		if (AI_load(UNITAI_SETTLER_SEA, MISSIONAI_LOAD_SETTLER, NO_UNITAI, -1, -1, -1, 0, MOVE_NO_ENEMY_TERRITORY))
@@ -1213,11 +1276,13 @@ void CvUnitAI::AI_settleMove()
 		}
 	}
 
+	g_crashSubPhase = 770; // settleMove: final retreatToCity
 	if (AI_retreatToCity())
 	{
 		return;
 	}
 
+	g_crashSubPhase = 212; // settleMove: final AI_safety
 	if (AI_safety())
 	{
 		return;

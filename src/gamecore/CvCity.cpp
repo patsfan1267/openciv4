@@ -143,12 +143,16 @@ CvCity::~CvCity()
 }
 
 
+extern volatile int g_crashSubPhase;
+
 void CvCity::init(int iID, PlayerTypes eOwner, int iX, int iY, bool bBumpUnits, bool bUpdatePlotGroups)
 {
 	CvPlot* pAdjacentPlot;
 	CvPlot* pPlot;
 	BuildingTypes eLoopBuilding;
 	int iI;
+
+	g_crashSubPhase = 900; // CvCity::init entry
 
 	pPlot = GC.getMapINLINE().plotINLINE(iX, iY);
 
@@ -237,6 +241,7 @@ void CvCity::init(int iID, PlayerTypes eOwner, int iX, int iY, bool bBumpUnits, 
 		}
 	}
 
+	g_crashSubPhase = 910; // CvCity::init militaryHappiness
 	changeMilitaryHappinessUnits(pPlot->plotCount(PUF_isMilitaryHappiness));
 
 	for (iI = 0; iI < NUM_COMMERCE_TYPES; iI++)
@@ -251,7 +256,7 @@ void CvCity::init(int iID, PlayerTypes eOwner, int iX, int iY, bool bBumpUnits, 
 			setNumFreeBuilding(((BuildingTypes)iI), 1);
 		}
 	}
-
+	g_crashSubPhase = 915; // CvCity::init area/team/game counts
 	area()->changeCitiesPerPlayer(getOwnerINLINE(), 1);
 
 	GET_TEAM(getTeam()).changeNumCities(1);
@@ -302,6 +307,7 @@ void CvCity::init(int iID, PlayerTypes eOwner, int iX, int iY, bool bBumpUnits, 
 		}
 	}
 
+	g_crashSubPhase = 920; // CvCity::init espionage/plotGroups/AI
 	updateEspionageVisibility(false);
 
 	if (bUpdatePlotGroups)
@@ -309,7 +315,9 @@ void CvCity::init(int iID, PlayerTypes eOwner, int iX, int iY, bool bBumpUnits, 
 		GC.getGameINLINE().updatePlotGroups();
 	}
 
+	g_crashSubPhase = 925; // CvCity::init AI_init
 	AI_init();
+	g_crashSubPhase = 930; // CvCity::init complete
 }
 
 

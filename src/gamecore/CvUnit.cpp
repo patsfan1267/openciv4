@@ -5191,13 +5191,21 @@ bool CvUnit::stealPlans()
 }
 
 
+// OpenCiv4: sub-phase tracking for crash diagnostics (defined in main.cpp)
+extern volatile int g_crashSubPhase;
+
 bool CvUnit::canFound(const CvPlot* pPlot, bool bTestVisible) const
 {
+	if (pPlot == NULL)
+		return false;
+
+	g_crashSubPhase = 301; // canFound: isFound check
 	if (!isFound())
 	{
 		return false;
 	}
 
+	g_crashSubPhase = 302; // canFound: CvPlayer::canFound check
 	if (!(GET_PLAYER(getOwnerINLINE()).canFound(pPlot->getX_INLINE(), pPlot->getY_INLINE(), bTestVisible)))
 	{
 		return false;
@@ -5209,25 +5217,37 @@ bool CvUnit::canFound(const CvPlot* pPlot, bool bTestVisible) const
 
 bool CvUnit::found()
 {
+	fprintf(stderr, "  [TRACE] CvUnit::found() entered unit=%d owner=%d at (%d,%d)\n",
+			getID(), getOwnerINLINE(), getX_INLINE(), getY_INLINE()); fflush(stderr);
+	g_crashSubPhase = 600; // CvUnit::found entry
 	if (!canFound(plot()))
 	{
 		return false;
 	}
 
+	g_crashSubPhase = 601; // CvUnit::found after canFound
+	fprintf(stderr, "  [TRACE] CvUnit::found() canFound passed, calling lookAt\n"); fflush(stderr);
 	if (GC.getGameINLINE().getActivePlayer() == getOwnerINLINE())
 	{
 		gDLL->getInterfaceIFace()->lookAt(plot()->getPoint(), CAMERALOOKAT_NORMAL);
 	}
 
+	g_crashSubPhase = 602; // CvUnit::found calling CvPlayer::found
+	fprintf(stderr, "  [TRACE] CvUnit::found() calling CvPlayer::found\n"); fflush(stderr);
 	GET_PLAYER(getOwnerINLINE()).found(getX_INLINE(), getY_INLINE());
 
+	g_crashSubPhase = 603; // CvUnit::found after CvPlayer::found
+	fprintf(stderr, "  [TRACE] CvUnit::found() CvPlayer::found done, calling kill\n"); fflush(stderr);
 	if (plot()->isActiveVisible(false))
 	{
 		NotifyEntity(MISSION_FOUND);
 	}
 
+	g_crashSubPhase = 604; // CvUnit::found calling kill
 	kill(true);
 
+	g_crashSubPhase = 605; // CvUnit::found done
+	fprintf(stderr, "  [TRACE] CvUnit::found() complete\n"); fflush(stderr);
 	return true;
 }
 

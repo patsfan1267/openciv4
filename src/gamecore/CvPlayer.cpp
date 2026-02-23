@@ -32,6 +32,9 @@
 #include "CvDLLFAStarIFaceBase.h"
 #include "CvDLLPythonIFaceBase.h"
 
+// OpenCiv4: crash diagnostics (defined in main.cpp)
+extern volatile int g_crashSubPhase;
+
 // Public Functions...
 
 CvPlayer::CvPlayer()
@@ -1246,12 +1249,22 @@ CvCity* CvPlayer::initCity(int iX, int iY, bool bBumpUnits, bool bUpdatePlotGrou
 
 	CvCity* pCity;
 
+	g_crashSubPhase = 820; // initCity: addCity
+	fprintf(stderr, "  [TRACE] initCity(%d,%d) calling addCity\n", iX, iY); fflush(stderr);
 	pCity = addCity();
+	g_crashSubPhase = 821; // initCity: after addCity
+	fprintf(stderr, "  [TRACE] initCity(%d,%d) addCity returned %p\n", iX, iY, (void*)pCity); fflush(stderr);
 
 	FAssertMsg(pCity != NULL, "City is not assigned a valid value");
+	if (pCity == NULL) return NULL;
+
 	FAssertMsg(!(GC.getMapINLINE().plotINLINE(iX, iY)->isCity()), "No city is expected at this plot when initializing new city");
 
+	g_crashSubPhase = 822; // initCity: pCity->init
+	fprintf(stderr, "  [TRACE] initCity(%d,%d) calling pCity->init id=%d\n", iX, iY, pCity->getID()); fflush(stderr);
 	pCity->init(pCity->getID(), getID(), iX, iY, bBumpUnits, bUpdatePlotGroups);
+	g_crashSubPhase = 823; // initCity: done
+	fprintf(stderr, "  [TRACE] initCity(%d,%d) init complete\n", iX, iY); fflush(stderr);
 
 	return pCity;
 }
@@ -5003,8 +5016,13 @@ bool CvPlayer::canFound(int iX, int iY, bool bTestVisible) const
 	int iRange;
 	int iDX, iDY;
 
+	g_crashSubPhase = 400; // canFound: entry
 	pPlot = GC.getMapINLINE().plotINLINE(iX, iY);
 
+	if (pPlot == NULL)
+		return false;
+
+	g_crashSubPhase = 401; // canFound: python callback
 	long lResult=0;
 	if(GC.getUSE_CANNOT_FOUND_CITY_CALLBACK())
 	{
@@ -5020,6 +5038,7 @@ bool CvPlayer::canFound(int iX, int iY, bool bTestVisible) const
 		}
 	}
 
+	g_crashSubPhase = 402; // canFound: game option check
 	if (GC.getGameINLINE().isFinalInitialized())
 	{
 		if (GC.getGameINLINE().isOption(GAMEOPTION_ONE_CITY_CHALLENGE) && isHuman())
@@ -5031,11 +5050,13 @@ bool CvPlayer::canFound(int iX, int iY, bool bTestVisible) const
 		}
 	}
 
+	g_crashSubPhase = 403; // canFound: isImpassable
 	if (pPlot->isImpassable())
 	{
 		return false;
 	}
 
+	g_crashSubPhase = 404; // canFound: feature check
 	if (pPlot->getFeatureType() != NO_FEATURE)
 	{
 		if (GC.getFeatureInfo(pPlot->getFeatureType()).isNoCity())
@@ -5044,25 +5065,43 @@ bool CvPlayer::canFound(int iX, int iY, bool bTestVisible) const
 		}
 	}
 
+	g_crashSubPhase = 405; // canFound: owner check
 	if (pPlot->isOwned() && (pPlot->getOwnerINLINE() != getID()))
 	{
 		return false;
 	}
 
+	g_crashSubPhase = 406; // canFound: terrain type get
 	bValid = false;
 
-	if (!bValid)
 	{
-		if (GC.getTerrainInfo(pPlot->getTerrainType()).isFound())
+		TerrainTypes eTerrain = pPlot->getTerrainType();
+		g_crashSubPhase = 407; // canFound: terrain bounds check
+		int numTerrains = GC.getNumTerrainInfos();
+		g_crashSubPhase = 408; // canFound: after bounds get
+		if (eTerrain < 0 || eTerrain >= numTerrains)
+		{
+			fprintf(stderr, "  [CRASH-DBG] canFound: BAD terrain type %d at (%d,%d)! numTerrains=%d\n",
+					(int)eTerrain, iX, iY, numTerrains);
+			return false;
+		}
+		g_crashSubPhase = 409; // canFound: terrain info ptr check
+		CvTerrainInfo& kTerrain = GC.getTerrainInfo(eTerrain);
+		g_crashSubPhase = 410; // canFound: isFound check
+		if (kTerrain.isFound())
 		{
 			bValid = true;
 		}
 	}
 
+	g_crashSubPhase = 411; // canFound: isFoundCoast check
+
 	if (!bValid)
 	{
+		g_crashSubPhase = 412; // canFound: calling isFoundCoast
 		if (GC.getTerrainInfo(pPlot->getTerrainType()).isFoundCoast())
 		{
+			g_crashSubPhase = 413; // canFound: calling isCoastalLand
 			if (pPlot->isCoastalLand())
 			{
 				bValid = true;
@@ -5070,10 +5109,14 @@ bool CvPlayer::canFound(int iX, int iY, bool bTestVisible) const
 		}
 	}
 
+	g_crashSubPhase = 414; // canFound: isFoundFreshWater check
+
 	if (!bValid)
 	{
+		g_crashSubPhase = 415; // canFound: calling isFoundFreshWater
 		if (GC.getTerrainInfo(pPlot->getTerrainType()).isFoundFreshWater())
 		{
+			g_crashSubPhase = 416; // canFound: calling isFreshWater
 			if (pPlot->isFreshWater())
 			{
 				bValid = true;
@@ -5081,6 +5124,7 @@ bool CvPlayer::canFound(int iX, int iY, bool bTestVisible) const
 		}
 	}
 
+	g_crashSubPhase = 417; // canFound: water callback
 	if(GC.getUSE_CAN_FOUND_CITIES_ON_WATER_CALLBACK())
 	{
 		CyArgsList argsList2;
@@ -5107,21 +5151,37 @@ bool CvPlayer::canFound(int iX, int iY, bool bTestVisible) const
 		return false;
 	}
 
+	g_crashSubPhase = 418; // canFound: city range loop
 	if (!bTestVisible)
 	{
+		g_crashSubPhase = 419; // getMIN_CITY_RANGE
 		iRange = GC.getMIN_CITY_RANGE();
+		g_crashSubPhase = 420; // got range
+		if (iRange < 0 || iRange > 10)
+		{
+			fprintf(stderr, "  [CRASH-DBG] canFound: BAD MIN_CITY_RANGE=%d\n", iRange);
+			fflush(stderr);
+			return false;
+		}
 
 		for (iDX = -(iRange); iDX <= iRange; iDX++)
 		{
 			for (iDY = -(iRange); iDY <= iRange; iDY++)
 			{
+				g_crashSubPhase = 421; // plotXY call
 				pLoopPlot	= plotXY(pPlot->getX_INLINE(), pPlot->getY_INLINE(), iDX, iDY);
 
 				if (pLoopPlot != NULL)
 				{
+					g_crashSubPhase = 422; // isCity check
 					if (pLoopPlot->isCity())
 					{
-						if (pLoopPlot->area() == pPlot->area())
+						g_crashSubPhase = 423; // area comparison
+						CvArea* pLoopArea = pLoopPlot->area();
+						g_crashSubPhase = 424;
+						CvArea* pThisArea = pPlot->area();
+						g_crashSubPhase = 425;
+						if (pLoopArea == pThisArea)
 						{
 							return false;
 						}
@@ -5131,6 +5191,9 @@ bool CvPlayer::canFound(int iX, int iY, bool bTestVisible) const
 		}
 	}
 
+	g_crashSubPhase = 430; // canFound returning true
+	fprintf(stderr, "  [TRACE] canFound(%d,%d) returning TRUE\n", iX, iY);
+	fflush(stderr);
 	return true;
 }
 
@@ -5142,14 +5205,30 @@ void CvPlayer::found(int iX, int iY)
 	UnitTypes eDefenderUnit;
 	int iI;
 
+	g_crashSubPhase = 800; // CvPlayer::found entry
+	fprintf(stderr, "  [TRACE] CvPlayer::found(%d,%d) player=%d entry\n", iX, iY, getID()); fflush(stderr);
+
+	g_crashSubPhase = 801; // CvPlayer::found canFound check
 	if (!canFound(iX, iY))
 	{
+		fprintf(stderr, "  [TRACE] CvPlayer::found(%d,%d) canFound failed\n", iX, iY); fflush(stderr);
 		return;
 	}
 
+	g_crashSubPhase = 802; // CvPlayer::found initCity
+	fprintf(stderr, "  [TRACE] CvPlayer::found(%d,%d) calling initCity\n", iX, iY); fflush(stderr);
 	pCity = initCity(iX, iY, true, true);
+	g_crashSubPhase = 803; // CvPlayer::found after initCity
+	fprintf(stderr, "  [TRACE] CvPlayer::found(%d,%d) initCity returned %p\n", iX, iY, (void*)pCity); fflush(stderr);
 	FAssertMsg(pCity != NULL, "City is not assigned a valid value");
 
+	if (pCity == NULL)
+	{
+		fprintf(stderr, "  [TRACE] CvPlayer::found(%d,%d) initCity returned NULL!\n", iX, iY); fflush(stderr);
+		return;
+	}
+
+	g_crashSubPhase = 804; // CvPlayer::found barbarian check
 	if (isBarbarian())
 	{
 		eDefenderUnit = pCity->AI_bestUnitAI(UNITAI_CITY_DEFENSE);
@@ -5168,6 +5247,8 @@ void CvPlayer::found(int iX, int iY)
 		}
 	}
 
+	g_crashSubPhase = 805; // CvPlayer::found building loop
+	fprintf(stderr, "  [TRACE] CvPlayer::found(%d,%d) building loop\n", iX, iY); fflush(stderr);
 	for (iI = 0; iI < GC.getNumBuildingClassInfos(); iI++)
 	{
 		eLoopBuilding = ((BuildingTypes)(GC.getCivilizationInfo(getCivilizationType()).getCivilizationBuildings(iI)));
@@ -5227,6 +5308,8 @@ void CvPlayer::found(int iX, int iY)
 		pCity->doFoundMessage();
 	}
 
+	g_crashSubPhase = 810; // CvPlayer::found complete
+	fprintf(stderr, "  [TRACE] CvPlayer::found(%d,%d) complete\n", iX, iY); fflush(stderr);
 	CvEventReporter::getInstance().cityBuilt(pCity);
 }
 

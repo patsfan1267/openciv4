@@ -13,17 +13,43 @@
 #include <cstdint>
 #include <csignal>
 #include <cstdlib>
+#include <windows.h>
 
 // Crash handler to print which turn/phase we were in when crashing
 static volatile int g_crashTurn = -1;
 static volatile int g_crashPlayer = -1;
 static volatile int g_crashPhase = -1; // 0=doTurn,1=doTurnUnits,2=AI_unitUpdate,3=game.doTurn
+volatile int g_crashSubPhase = -1; // Sub-phase within AI_unitUpdate (set from gamecore)
 
 static void crashHandler(int sig) {
-    fprintf(stderr, "\n!!! CRASH (signal %d) at turn=%d player=%d phase=%d !!!\n",
-            sig, g_crashTurn, g_crashPlayer, g_crashPhase);
+    fprintf(stderr, "\n!!! CRASH (signal %d) at turn=%d player=%d phase=%d sub=%d !!!\n",
+            sig, g_crashTurn, g_crashPlayer, g_crashPhase, g_crashSubPhase);
     fflush(stderr);
     _exit(139);
+}
+
+// Windows Vectored Exception Handler - captures faulting address for access violations
+static LONG WINAPI vehHandler(EXCEPTION_POINTERS* pExInfo) {
+    if (pExInfo->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
+        ULONG_PTR readWrite = pExInfo->ExceptionRecord->ExceptionInformation[0]; // 0=read, 1=write
+        ULONG_PTR faultAddr = pExInfo->ExceptionRecord->ExceptionInformation[1];
+        ULONG_PTR instrAddr = (ULONG_PTR)pExInfo->ExceptionRecord->ExceptionAddress;
+        fprintf(stderr, "\n!!! ACCESS VIOLATION: %s at address 0x%llX (instruction at 0x%llX)\n",
+                readWrite == 0 ? "READ" : "WRITE",
+                (unsigned long long)faultAddr, (unsigned long long)instrAddr);
+        fprintf(stderr, "    turn=%d player=%d phase=%d sub=%d\n",
+                g_crashTurn, g_crashPlayer, g_crashPhase, g_crashSubPhase);
+        // Print RIP, RSP, and a few registers for context
+        CONTEXT* ctx = pExInfo->ContextRecord;
+        fprintf(stderr, "    RIP=0x%llX RSP=0x%llX RBP=0x%llX\n",
+                (unsigned long long)ctx->Rip, (unsigned long long)ctx->Rsp, (unsigned long long)ctx->Rbp);
+        fprintf(stderr, "    RAX=0x%llX RBX=0x%llX RCX=0x%llX RDX=0x%llX\n",
+                (unsigned long long)ctx->Rax, (unsigned long long)ctx->Rbx,
+                (unsigned long long)ctx->Rcx, (unsigned long long)ctx->Rdx);
+        fflush(stderr);
+        _exit(139);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
 }
 
 
@@ -78,9 +104,13 @@ static int findCivLeaderPairs(CivLeaderPair* pairs, int maxPairs)
 
 int main(int argc, char* argv[])
 {
+    // Register VEH first to catch access violations with full detail
+    AddVectoredExceptionHandler(1, vehHandler);
     signal(SIGSEGV, crashHandler);
     signal(SIGABRT, crashHandler);
+    HMODULE hModule = GetModuleHandle(NULL);
     fprintf(stderr, "=== OpenCiv4 Engine ===\n");
+    fprintf(stderr, "Module base: 0x%llX\n", (unsigned long long)hModule);
     fprintf(stderr, "Phase 0: Headless Mode\n");
     fprintf(stderr, "Build: 64-bit (%zu-byte pointers)\n\n", sizeof(void*));
     fprintf(stderr, "BTS Install: %s\n\n", BTS_INSTALL_DIR);
@@ -200,7 +230,7 @@ int main(int argc, char* argv[])
             fprintf(stderr, "[main]   Player %d: %ls (AI)\n", i, pairs[i].szCivDesc);
         }
 
-        // Close remaining slots
+        // Close remaining slots (CvInitCore defaults each team to player index)
         for (int i = numPlayers; i < MAX_CIV_PLAYERS; i++)
         {
             initCore.setSlotStatus((PlayerTypes)i, SS_CLOSED);
@@ -285,14 +315,11 @@ int main(int argc, char* argv[])
             GET_TEAM((TeamTypes)i).init((TeamTypes)i);
         }
     }
+    // Init ALL player slots — even closed ones need valid team/state
+    // (BTS exe initializes all slots; game code assumes getTeam() is valid)
     for (int i = 0; i < MAX_PLAYERS; i++)
     {
-        if (GC.getInitCore().getSlotStatus((PlayerTypes)i) == SS_COMPUTER)
-        {
-            GET_PLAYER((PlayerTypes)i).init((PlayerTypes)i);
-            fprintf(stderr, "[main]   Initialized player %d: alive=%s\n",
-                    i, GET_PLAYER((PlayerTypes)i).isAlive() ? "yes" : "no");
-        }
+        GET_PLAYER((PlayerTypes)i).init((PlayerTypes)i);
     }
 
     // Set initial items: free techs, starting plots, starting units

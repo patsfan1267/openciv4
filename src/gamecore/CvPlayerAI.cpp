@@ -1044,6 +1044,9 @@ int CvPlayerAI::AI_movementPriority(CvSelectionGroup* pGroup) const
 }
 
 
+// OpenCiv4: sub-phase tracking for crash diagnostics (defined in main.cpp)
+extern volatile int g_crashSubPhase;
+
 void CvPlayerAI::AI_unitUpdate()
 {
 	PROFILE_FUNC();
@@ -1054,8 +1057,10 @@ void CvPlayerAI::AI_unitUpdate()
 	CLinkList<int> finalGroupCycle;
 	int iValue;
 
+	g_crashSubPhase = 0; // entering AI_unitUpdate
 	if (!hasBusyUnit())
 	{
+		g_crashSubPhase = 1; // force separate loop
 		pCurrUnitNode = headGroupCycleNode();
 
 		while (pCurrUnitNode != NULL)
@@ -1063,6 +1068,8 @@ void CvPlayerAI::AI_unitUpdate()
 			pLoopSelectionGroup = getSelectionGroup(pCurrUnitNode->m_data);
 			pCurrUnitNode = nextGroupCycleNode(pCurrUnitNode);
 
+			if (pLoopSelectionGroup == NULL)
+				continue;
 			if (pLoopSelectionGroup->AI_isForceSeparate())
 			{
 				// do not split groups that are in the midst of attacking
@@ -1090,6 +1097,7 @@ void CvPlayerAI::AI_unitUpdate()
 		}
 		else
 		{
+			g_crashSubPhase = 2; // AI priority sort
 			tempGroupCycle.clear();
 			finalGroupCycle.clear();
 
@@ -1110,7 +1118,11 @@ void CvPlayerAI::AI_unitUpdate()
 				while (pCurrUnitNode != NULL)
 				{
 					pLoopSelectionGroup = getSelectionGroup(pCurrUnitNode->m_data);
-					FAssertMsg(pLoopSelectionGroup != NULL, "selection group node with NULL selection group");
+					if (pLoopSelectionGroup == NULL)
+					{
+						pCurrUnitNode = tempGroupCycle.deleteNode(pCurrUnitNode);
+						continue;
+					}
 
 					if (AI_movementPriority(pLoopSelectionGroup) <= iValue)
 					{
@@ -1126,7 +1138,9 @@ void CvPlayerAI::AI_unitUpdate()
 				iValue++;
 			}
 
+			g_crashSubPhase = 3; // AI_update loop
 			pCurrUnitNode = finalGroupCycle.head();
+			int g_loopCount = 0;
 
 			while (pCurrUnitNode != NULL)
 			{
@@ -1134,12 +1148,17 @@ void CvPlayerAI::AI_unitUpdate()
 
 				if (NULL != pLoopSelectionGroup)  // group might have been killed by a previous group update
 				{
-					if (pLoopSelectionGroup->AI_update())
+					g_crashSubPhase = 4; // inside AI_update call
+					g_loopCount++;
+					bool bUpdated = pLoopSelectionGroup->AI_update();
+					g_crashSubPhase = 5; // returned from AI_update
+					if (bUpdated)
 					{
 						break; // pointers could become invalid...
 					}
 				}
 
+				g_crashSubPhase = 6; // advancing to next group
 				pCurrUnitNode = finalGroupCycle.next(pCurrUnitNode);
 			}
 		}

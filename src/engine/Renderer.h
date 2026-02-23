@@ -54,6 +54,9 @@ private:
     // Mouse position (for hover tooltip)
     int m_mouseX = 0, m_mouseY = 0;
 
+    // Player panel toggle
+    bool m_showPlayerPanel = true;
+
     // Hex geometry constants (at zoom=1)
     // Flat-top hexagon: width = 2*R, height = sqrt(3)*R
     // Column spacing = 1.5*R (3/4 of width), row spacing = sqrt(3)*R
@@ -100,4 +103,7 @@ private:
 
     // Tooltip (hover info)
     void drawTooltip(const MapSnapshot& snapshot);
+
+    // Player info panel
+    void drawPlayerPanel(const MapSnapshot& snapshot);
 };

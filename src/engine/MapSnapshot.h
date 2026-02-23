@@ -25,6 +25,16 @@ struct PlotData {
     std::string cityName;  // empty if not a city
 };
 
+struct PlayerInfo {
+    bool alive = false;
+    int numCities = 0;
+    int numUnits = 0;
+    int totalPop = 0;
+    int score = 0;
+    uint8_t colorR = 200, colorG = 200, colorB = 200;
+    std::string civName;
+};
+
 struct MapSnapshot {
     int width = 0;
     int height = 0;
@@ -32,7 +42,11 @@ struct MapSnapshot {
     int gameYear = 0;
     bool wrapX = false;
     bool wrapY = false;
+    bool paused = false;
+    int turnDelayMs = 0;
     std::vector<PlotData> plots;  // size = width * height, row-major (y * width + x)
+    PlayerInfo players[18];       // MAX_CIV_PLAYERS = 18
+    int numPlayers = 0;
     std::mutex mtx;
 
     const PlotData& getPlot(int x, int y) const {

@@ -83,6 +83,8 @@ static LONG WINAPI vehHandler(EXCEPTION_POINTERS* pExInfo) {
 static MapSnapshot g_mapSnapshot;
 static std::atomic<bool> g_gameRunning{true};
 static std::atomic<bool> g_gameThreadDone{false};
+static std::atomic<bool> g_gamePaused{false};
+static std::atomic<int> g_turnDelayMs{0}; // milliseconds delay between turns (0=max speed)
 
 // ---- Helper: find valid civ/leader pairs from loaded XML data ----
 struct CivLeaderPair {
@@ -176,6 +178,44 @@ static void updateMapSnapshot()
         }
     }
 
+    // Collect player info
+    PlayerInfo playerInfos[18];
+    int numPlayers = 0;
+    for (int p = 0; p < MAX_CIV_PLAYERS; p++) {
+        CvPlayer& kPlayer = GET_PLAYER((PlayerTypes)p);
+        if (kPlayer.isAlive()) {
+            PlayerInfo& pi = playerInfos[p];
+            pi.alive = true;
+            pi.numCities = kPlayer.getNumCities();
+            pi.numUnits = kPlayer.getNumUnits();
+            pi.totalPop = kPlayer.getTotalPopulation();
+            pi.score = GC.getGameINLINE().getPlayerScore((PlayerTypes)p);
+
+            // Get player color
+            PlayerColorTypes eColor = kPlayer.getPlayerColor();
+            if (eColor >= 0 && eColor < GC.getNumPlayerColorInfos()) {
+                CvPlayerColorInfo& colorInfo = GC.getPlayerColorInfo(eColor);
+                ColorTypes ePrimary = (ColorTypes)colorInfo.getColorTypePrimary();
+                if (ePrimary >= 0 && ePrimary < GC.getNumColorInfos()) {
+                    const NiColorA& c = GC.getColorInfo(ePrimary).getColor();
+                    pi.colorR = (uint8_t)(c.r * 255.0f);
+                    pi.colorG = (uint8_t)(c.g * 255.0f);
+                    pi.colorB = (uint8_t)(c.b * 255.0f);
+                }
+            }
+
+            // Civ name (wchar -> char)
+            const wchar_t* wDesc = GC.getCivilizationInfo(kPlayer.getCivilizationType()).getShortDescription(0);
+            if (wDesc) {
+                std::string name;
+                for (int c = 0; wDesc[c] && c < 32; c++)
+                    name += (char)(wDesc[c] < 128 ? wDesc[c] : '?');
+                pi.civName = name;
+            }
+            numPlayers = p + 1;
+        }
+    }
+
     // Swap into the shared snapshot under lock
     {
         std::lock_guard<std::mutex> lock(g_mapSnapshot.mtx);
@@ -185,7 +225,12 @@ static void updateMapSnapshot()
         g_mapSnapshot.gameYear = GC.getGameINLINE().getGameTurnYear();
         g_mapSnapshot.wrapX = map.isWrapX();
         g_mapSnapshot.wrapY = map.isWrapY();
+        g_mapSnapshot.paused = g_gamePaused.load();
+        g_mapSnapshot.turnDelayMs = g_turnDelayMs.load();
         g_mapSnapshot.plots = std::move(newPlots);
+        for (int p = 0; p < 18; p++)
+            g_mapSnapshot.players[p] = playerInfos[p];
+        g_mapSnapshot.numPlayers = numPlayers;
     }
 }
 
@@ -200,6 +245,16 @@ static void gameThreadFunc()
 
     for (int iTurn = 0; iTurn < MAX_TURNS && g_gameRunning; iTurn++)
     {
+        // Check pause state
+        while (g_gamePaused && g_gameRunning) {
+            Sleep(50);
+        }
+        if (!g_gameRunning) break;
+
+        // Configurable delay between turns
+        int delay = g_turnDelayMs.load();
+        if (delay > 0) Sleep(delay);
+
         // Process each alive player's full turn
         for (int p = 0; p < MAX_PLAYERS && g_gameRunning; p++)
         {
@@ -667,7 +722,24 @@ int main(int argc, char* argv[])
                                 case SDL_KEYDOWN:
                                     if (event.key.keysym.sym == SDLK_ESCAPE)
                                         running = false;
-                                    else
+                                    else if (event.key.keysym.sym == SDLK_SPACE) {
+                                        g_gamePaused = !g_gamePaused.load();
+                                        // Update snapshot immediately so HUD reflects change
+                                        std::lock_guard<std::mutex> lock(g_mapSnapshot.mtx);
+                                        g_mapSnapshot.paused = g_gamePaused.load();
+                                    } else if (event.key.keysym.sym == SDLK_EQUALS ||
+                                               event.key.keysym.sym == SDLK_KP_PLUS) {
+                                        int d = g_turnDelayMs.load();
+                                        g_turnDelayMs = (d == 0) ? 100 : std::min(d * 2, 5000);
+                                        std::lock_guard<std::mutex> lock(g_mapSnapshot.mtx);
+                                        g_mapSnapshot.turnDelayMs = g_turnDelayMs.load();
+                                    } else if (event.key.keysym.sym == SDLK_MINUS ||
+                                               event.key.keysym.sym == SDLK_KP_MINUS) {
+                                        int d = g_turnDelayMs.load();
+                                        g_turnDelayMs = (d <= 100) ? 0 : d / 2;
+                                        std::lock_guard<std::mutex> lock(g_mapSnapshot.mtx);
+                                        g_mapSnapshot.turnDelayMs = g_turnDelayMs.load();
+                                    } else
                                         renderer.handleKeyDown(event.key.keysym.sym, g_mapSnapshot);
                                     break;
                                 case SDL_KEYUP:

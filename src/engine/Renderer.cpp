@@ -446,8 +446,10 @@ void Renderer::draw(MapSnapshot& snapshot)
             }
         }
 
-        // --- HUD, minimap, tooltip ---
+        // --- HUD, panels, minimap, tooltip ---
         drawHUD(snapshot);
+        if (m_showPlayerPanel)
+            drawPlayerPanel(snapshot);
         if (m_showMinimap)
             drawMinimap(snapshot);
         drawTooltip(snapshot);
@@ -463,10 +465,21 @@ void Renderer::draw(MapSnapshot& snapshot)
 void Renderer::drawHUD(MapSnapshot& snapshot)
 {
     if (m_fontMedium) {
-        // Top-left: turn & year
-        char buf[128];
-        snprintf(buf, sizeof(buf), "Turn %d  |  Year %d  |  Map %dx%d",
-                 snapshot.gameTurn, snapshot.gameYear, snapshot.width, snapshot.height);
+        // Top-left: turn & year & pause status
+        char buf[256];
+        if (snapshot.paused) {
+            snprintf(buf, sizeof(buf), "Turn %d  |  Year %d  |  Map %dx%d  |  PAUSED",
+                     snapshot.gameTurn, snapshot.gameYear, snapshot.width, snapshot.height);
+        } else {
+            int delay = snapshot.turnDelayMs;
+            if (delay > 0) {
+                snprintf(buf, sizeof(buf), "Turn %d  |  Year %d  |  Map %dx%d  |  Delay %dms",
+                         snapshot.gameTurn, snapshot.gameYear, snapshot.width, snapshot.height, delay);
+            } else {
+                snprintf(buf, sizeof(buf), "Turn %d  |  Year %d  |  Map %dx%d  |  Max Speed",
+                         snapshot.gameTurn, snapshot.gameYear, snapshot.width, snapshot.height);
+            }
+        }
         int tw = 0, th = 0;
         TTF_SizeText(m_fontMedium, buf, &tw, &th);
 
@@ -592,6 +605,9 @@ void Renderer::drawHelpOverlay()
         "  Mouse wheel    - Zoom in/out",
         "  Right-drag     - Pan camera",
         "  F / Home       - Fit map to window",
+        "  Space          - Pause / unpause game",
+        "  +/-            - Slower / faster turns",
+        "  P              - Toggle player panel",
         "  M              - Toggle minimap",
         "  H              - Toggle this help",
         "  Escape         - Quit",
@@ -730,6 +746,56 @@ void Renderer::drawTooltip(const MapSnapshot& snapshot)
         drawText(line2, tipX + 4, tipY + 3 + th1 + 2, m_fontSmall, 180, 200, 180);
 }
 
+// ---------- Player info panel ----------
+
+void Renderer::drawPlayerPanel(const MapSnapshot& snapshot)
+{
+    if (!m_fontSmall) return;
+
+    int panelW = 220;
+    int lineH = 16;
+    int padX = 8, padY = 6;
+
+    // Count alive players
+    int alive = 0;
+    for (int p = 0; p < snapshot.numPlayers; p++)
+        if (snapshot.players[p].alive) alive++;
+
+    int panelH = padY * 2 + (alive + 1) * lineH; // +1 for header
+    int panelX = 0;
+    int panelY = 28; // below the top HUD bar
+
+    // Background
+    SDL_Rect bg = {panelX, panelY, panelW, panelH};
+    SDL_SetRenderDrawColor(m_renderer, 10, 10, 20, 210);
+    SDL_RenderFillRect(m_renderer, &bg);
+
+    // Header
+    drawText("Player       Cities Pop Score", panelX + padX, panelY + padY,
+             m_fontSmall, 180, 190, 160);
+
+    int row = 1;
+    for (int p = 0; p < snapshot.numPlayers; p++) {
+        const PlayerInfo& pi = snapshot.players[p];
+        if (!pi.alive) continue;
+
+        int ly = panelY + padY + row * lineH;
+
+        // Color swatch
+        SDL_Rect swatch = {panelX + padX, ly + 2, 10, 10};
+        SDL_SetRenderDrawColor(m_renderer, pi.colorR, pi.colorG, pi.colorB, 255);
+        SDL_RenderFillRect(m_renderer, &swatch);
+
+        // Player info
+        char buf[128];
+        snprintf(buf, sizeof(buf), "%-12s %3d  %3d  %4d",
+                 pi.civName.c_str(), pi.numCities, pi.totalPop, pi.score);
+        drawText(buf, panelX + padX + 14, ly, m_fontSmall, 200, 210, 200);
+
+        row++;
+    }
+}
+
 // ---------- Input handling ----------
 
 void Renderer::handleKeyDown(SDL_Keycode key, MapSnapshot& snapshot)
@@ -751,6 +817,9 @@ void Renderer::handleKeyDown(SDL_Keycode key, MapSnapshot& snapshot)
             break;
         case SDLK_h:
             m_showHelp = !m_showHelp;
+            break;
+        case SDLK_p:
+            m_showPlayerPanel = !m_showPlayerPanel;
             break;
     }
 }

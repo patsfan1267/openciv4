@@ -249,16 +249,61 @@ void Renderer::draw(MapSnapshot& snapshot)
             m_cameraInitialized = true;
         }
 
+        // Normalize camera for wrapping maps (keep offset in [0, mapPixel) range)
+        if (snapshot.wrapX) {
+            float mapPixelW = snapshot.width * TILE_SIZE;
+            m_camera.offsetX = fmodf(m_camera.offsetX, mapPixelW);
+            if (m_camera.offsetX < 0) m_camera.offsetX += mapPixelW;
+        }
+        if (snapshot.wrapY) {
+            float mapPixelH = snapshot.height * TILE_SIZE;
+            m_camera.offsetY = fmodf(m_camera.offsetY, mapPixelH);
+            if (m_camera.offsetY < 0) m_camera.offsetY += mapPixelH;
+        }
+
         float screenTileSize = TILE_SIZE * m_camera.zoom;
 
+        // Calculate visible tile range using virtual coords (supports wrapping)
+        float viewLeft = m_camera.offsetX;
+        float viewRight = m_camera.offsetX + m_windowW / m_camera.zoom;
+        float viewTop = m_camera.offsetY;
+        float viewBottom = m_camera.offsetY + m_windowH / m_camera.zoom;
+
+        int colStart = (int)floorf(viewLeft / TILE_SIZE) - 1;
+        int colEnd   = (int)ceilf(viewRight / TILE_SIZE);
+        int rowStart = (int)floorf(viewTop / TILE_SIZE) - 1;
+        int rowEnd   = (int)ceilf(viewBottom / TILE_SIZE);
+
+        // For non-wrapping axes, clamp to map bounds
+        if (!snapshot.wrapX) {
+            colStart = std::max(0, colStart);
+            colEnd   = std::min(snapshot.width - 1, colEnd);
+        }
+        if (!snapshot.wrapY) {
+            rowStart = std::max(0, rowStart);
+            rowEnd   = std::min(snapshot.height - 1, rowEnd);
+        }
+
         // --- Pass 1: Draw all tiles ---
-        for (int y = 0; y < snapshot.height; y++) {
-            for (int x = 0; x < snapshot.width; x++) {
+        for (int vr = rowStart; vr <= rowEnd; vr++) {
+            for (int vc = colStart; vc <= colEnd; vc++) {
+                // Map virtual coords to actual game coords (with wrapping)
+                int x = snapshot.wrapX
+                    ? ((vc % snapshot.width) + snapshot.width) % snapshot.width
+                    : vc;
+                int fr = snapshot.wrapY
+                    ? ((vr % snapshot.height) + snapshot.height) % snapshot.height
+                    : vr;
+                int y = snapshot.height - 1 - fr;
+
+                if (x < 0 || x >= snapshot.width || y < 0 || y >= snapshot.height)
+                    continue;
+
                 const PlotData& plot = snapshot.getPlot(x, y);
 
-                float worldTX, worldTY;
-                tileTopLeft(x, y, snapshot.height, worldTX, worldTY);
-
+                // Screen position uses virtual coords for seamless wrapping
+                float worldTX = vc * TILE_SIZE;
+                float worldTY = vr * TILE_SIZE;
                 float screenTX = (worldTX - m_camera.offsetX) * m_camera.zoom;
                 float screenTY = (worldTY - m_camera.offsetY) * m_camera.zoom;
 
@@ -337,9 +382,16 @@ void Renderer::draw(MapSnapshot& snapshot)
                     for (int e = 0; e < 4; e++) {
                         int nx = x + nDx[e];
                         int ny = y + nDy[e];
+
+                        // Handle map wrapping for neighbor lookup
+                        if (snapshot.wrapX)
+                            nx = ((nx % snapshot.width) + snapshot.width) % snapshot.width;
+                        if (snapshot.wrapY)
+                            ny = ((ny % snapshot.height) + snapshot.height) % snapshot.height;
+
                         bool drawEdge = false;
                         if (nx < 0 || nx >= snapshot.width || ny < 0 || ny >= snapshot.height) {
-                            drawEdge = true; // map edge = border
+                            drawEdge = true; // non-wrapping map edge = border
                         } else if (snapshot.getPlot(nx, ny).ownerID != plot.ownerID) {
                             drawEdge = true;
                         }
@@ -382,14 +434,24 @@ void Renderer::draw(MapSnapshot& snapshot)
 
         // --- Pass 2: Draw city name labels (on top of everything) ---
         if (m_fontSmall && screenTileSize >= 8) {
-            for (int y = 0; y < snapshot.height; y++) {
-                for (int x = 0; x < snapshot.width; x++) {
-                    const PlotData& plot = snapshot.getPlot(x, y);
+            for (int vr2 = rowStart; vr2 <= rowEnd; vr2++) {
+                for (int vc2 = colStart; vc2 <= colEnd; vc2++) {
+                    int x2 = snapshot.wrapX
+                        ? ((vc2 % snapshot.width) + snapshot.width) % snapshot.width
+                        : vc2;
+                    int fr2 = snapshot.wrapY
+                        ? ((vr2 % snapshot.height) + snapshot.height) % snapshot.height
+                        : vr2;
+                    int y2 = snapshot.height - 1 - fr2;
+
+                    if (x2 < 0 || x2 >= snapshot.width || y2 < 0 || y2 >= snapshot.height)
+                        continue;
+
+                    const PlotData& plot = snapshot.getPlot(x2, y2);
                     if (!plot.isCity || plot.cityName.empty()) continue;
 
-                    float worldTX, worldTY;
-                    tileTopLeft(x, y, snapshot.height, worldTX, worldTY);
-
+                    float worldTX = vc2 * TILE_SIZE;
+                    float worldTY = vr2 * TILE_SIZE;
                     float screenTX = (worldTX - m_camera.offsetX) * m_camera.zoom;
                     float screenTY = (worldTY - m_camera.offsetY) * m_camera.zoom;
                     float screenCX = screenTX + screenTileSize * 0.5f;
@@ -547,21 +609,44 @@ void Renderer::drawMinimap(const MapSnapshot& snapshot)
     float worldRight = m_camera.offsetX + m_windowW / m_camera.zoom;
     float worldBottom = m_camera.offsetY + m_windowH / m_camera.zoom;
 
-    float vpLeft   = mmX + (worldLeft / mapPixelW) * mmW;
-    float vpTop    = mmY + (worldTop / mapPixelH) * mmH;
-    float vpRight  = mmX + (worldRight / mapPixelW) * mmW;
-    float vpBottom = mmY + (worldBottom / mapPixelH) * mmH;
-
-    // Clamp to minimap bounds
-    vpLeft   = std::max((float)mmX, std::min(vpLeft, (float)(mmX + mmW)));
-    vpTop    = std::max((float)mmY, std::min(vpTop, (float)(mmY + mmH)));
-    vpRight  = std::max((float)mmX, std::min(vpRight, (float)(mmX + mmW)));
-    vpBottom = std::max((float)mmY, std::min(vpBottom, (float)(mmY + mmH)));
-
     SDL_SetRenderDrawColor(m_renderer, 255, 255, 255, 255);
-    SDL_Rect vp = {(int)vpLeft, (int)vpTop,
-                   (int)(vpRight - vpLeft), (int)(vpBottom - vpTop)};
-    SDL_RenderDrawRect(m_renderer, &vp);
+
+    // Convert to fractional map coordinates
+    float fracLeft  = worldLeft / mapPixelW;
+    float fracRight = worldRight / mapPixelW;
+    float fracTop   = worldTop / mapPixelH;
+    float fracBot   = worldBottom / mapPixelH;
+
+    // Helper: draw a clamped viewport rect on the minimap
+    auto drawVPRect = [&](float fL, float fR, float fT, float fB) {
+        float vL = mmX + std::max(0.0f, std::min(fL, 1.0f)) * mmW;
+        float vR = mmX + std::max(0.0f, std::min(fR, 1.0f)) * mmW;
+        float vT = mmY + std::max(0.0f, std::min(fT, 1.0f)) * mmH;
+        float vB = mmY + std::max(0.0f, std::min(fB, 1.0f)) * mmH;
+        if (vR > vL && vB > vT) {
+            SDL_Rect vp = {(int)vL, (int)vT, (int)(vR - vL), (int)(vB - vT)};
+            SDL_RenderDrawRect(m_renderer, &vp);
+        }
+    };
+
+    // For wrapping maps, viewport may span the map edge — draw split rectangles
+    bool splitX = snapshot.wrapX && fracRight > 1.0f;
+    bool splitY = snapshot.wrapY && fracBot > 1.0f;
+
+    if (splitX && splitY) {
+        drawVPRect(fracLeft, 1.0f, fracTop, 1.0f);
+        drawVPRect(0.0f, fracRight - 1.0f, fracTop, 1.0f);
+        drawVPRect(fracLeft, 1.0f, 0.0f, fracBot - 1.0f);
+        drawVPRect(0.0f, fracRight - 1.0f, 0.0f, fracBot - 1.0f);
+    } else if (splitX) {
+        drawVPRect(fracLeft, 1.0f, fracTop, fracBot);
+        drawVPRect(0.0f, fracRight - 1.0f, fracTop, fracBot);
+    } else if (splitY) {
+        drawVPRect(fracLeft, fracRight, fracTop, 1.0f);
+        drawVPRect(fracLeft, fracRight, 0.0f, fracBot - 1.0f);
+    } else {
+        drawVPRect(fracLeft, fracRight, fracTop, fracBot);
+    }
 }
 
 // ---------- Help overlay ----------
@@ -627,8 +712,15 @@ void Renderer::drawTooltip(const MapSnapshot& snapshot)
     float worldY = m_mouseY / m_camera.zoom + m_camera.offsetY;
 
     // Simple grid division for square tiles
-    int col = (int)(worldX / TILE_SIZE);
-    int flippedRow = (int)(worldY / TILE_SIZE);
+    int col = (int)floorf(worldX / TILE_SIZE);
+    int flippedRow = (int)floorf(worldY / TILE_SIZE);
+
+    // Handle wrapping for tooltip coordinates
+    if (snapshot.wrapX)
+        col = ((col % snapshot.width) + snapshot.width) % snapshot.width;
+    if (snapshot.wrapY)
+        flippedRow = ((flippedRow % snapshot.height) + snapshot.height) % snapshot.height;
+
     int row = snapshot.height - 1 - flippedRow;
 
     // Bounds check

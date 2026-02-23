@@ -43,6 +43,21 @@ public:
     GLuint getOceanWaterGL() const { return m_oceanWaterGL; }
     GLuint getCoastWaterGL() const { return m_coastWaterGL; }
 
+    // Real water surface texture (from water.dds)
+    GLuint getWaterSurfaceGL() const { return m_waterSurfaceGL; }
+
+    // River atlas texture (allriverssmaller.dds — 512x1024 DXT3 with alpha)
+    GLuint getRiverAtlasGL() const { return m_riverAtlasGL; }
+
+    // Detail textures per terrain type (for zoom-in fine detail)
+    GLuint getTerrainDetailGL(int terrainType) const;
+
+    // Feature icon textures (button-style, used for features without blend textures)
+    // Already accessible via getFeatureTextureGL()
+
+    // Hill decal texture
+    GLuint getHillDecalGL() const { return m_hillDecalGL; }
+
     // Check if textures are loaded
     bool hasTextures() const { return !m_terrainTextures.empty() || !m_terrainTexturesGL.empty(); }
 
@@ -81,6 +96,18 @@ private:
     GLuint m_oceanWaterGL = 0;
     GLuint m_coastWaterGL = 0;
     void generateWaterTextures();
+
+    // Real water surface and river textures
+    GLuint m_waterSurfaceGL = 0;
+    GLuint m_riverAtlasGL = 0;
+
+    // Detail textures per terrain type
+    std::unordered_map<int, GLuint> m_terrainDetailGL;
+
+    // Hill decal texture
+    GLuint m_hillDecalGL = 0;
+
+    void loadExtraTextures();
 
     SDL_Texture* createTextureFromRGBA(const uint8_t* pixels, int w, int h);
     SDL_Texture* loadTextureFromFPK(const FPKArchive& fpk, const std::string& path);

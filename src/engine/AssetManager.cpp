@@ -71,6 +71,11 @@ AssetManager::~AssetManager() {
         if (pair.second) glDeleteTextures(1, &pair.second);
     if (m_oceanWaterGL) glDeleteTextures(1, &m_oceanWaterGL);
     if (m_coastWaterGL) glDeleteTextures(1, &m_coastWaterGL);
+    if (m_waterSurfaceGL) glDeleteTextures(1, &m_waterSurfaceGL);
+    if (m_riverAtlasGL) glDeleteTextures(1, &m_riverAtlasGL);
+    if (m_hillDecalGL) glDeleteTextures(1, &m_hillDecalGL);
+    for (auto& pair : m_terrainDetailGL)
+        if (pair.second) glDeleteTextures(1, &pair.second);
 }
 
 bool AssetManager::openArt0(const char* btsInstallDir) {
@@ -185,6 +190,7 @@ bool AssetManager::initGL(const char* btsInstallDir) {
             (int)m_terrainBlendGL.size(), (int)m_featureBlendGL.size());
 
     generateWaterTextures();
+    loadExtraTextures();
 
     return true;
 }
@@ -232,6 +238,52 @@ void AssetManager::generateWaterTextures() {
 
     fprintf(stderr, "[AssetManager] Generated procedural water textures (ocean=%u, coast=%u)\n",
             m_oceanWaterGL, m_coastWaterGL);
+}
+
+void AssetManager::loadExtraTextures() {
+    // Water surface texture (for rivers and improved water rendering)
+    m_waterSurfaceGL = loadGLTextureFromFPK("art/terrain/water/water.dds");
+    if (m_waterSurfaceGL)
+        fprintf(stderr, "[AssetManager] Loaded water surface texture\n");
+
+    // River atlas (512x1024 DXT3 with alpha for river shapes)
+    m_riverAtlasGL = loadGLTextureFromFPK("art/terrain/routes/rivers/allriverssmaller.dds");
+    if (m_riverAtlasGL)
+        fprintf(stderr, "[AssetManager] Loaded river atlas texture\n");
+
+    // Detail textures per terrain type (for zoomed-in fine detail)
+    struct DetailEntry { int type; const char* path; };
+    static DetailEntry detailPaths[] = {
+        { 0, "art/terrain/textures/grassdetail.dds" },
+        { 1, "art/terrain/textures/plainsdetail.dds" },
+        { 2, "art/terrain/textures/desertdetail.dds" },
+        { 3, "art/terrain/textures/tundradetail.dds" },
+        { 4, "art/terrain/textures/icedetail.dds" },
+        { 5, "art/terrain/textures/coastdetail.dds" },
+        { 6, "art/terrain/textures/oceandetail.dds" },
+    };
+    for (auto& entry : detailPaths) {
+        GLuint tex = loadGLTextureFromFPK(entry.path);
+        if (tex) {
+            m_terrainDetailGL[entry.type] = tex;
+            fprintf(stderr, "[AssetManager] Loaded detail %d: %s\n", entry.type, entry.path);
+        }
+    }
+
+    // Hill decal texture
+    m_hillDecalGL = loadGLTextureFromFPK("art/terrain/textures/hillblend.dds");
+    // Fallback: try alternative paths
+    if (!m_hillDecalGL) m_hillDecalGL = loadGLTextureFromFPK("art/terrain/features/hills/hill_all_01.dds");
+    if (m_hillDecalGL)
+        fprintf(stderr, "[AssetManager] Loaded hill decal texture\n");
+
+    fprintf(stderr, "[AssetManager] Loaded %d detail textures, water=%u, river=%u, hill=%u\n",
+            (int)m_terrainDetailGL.size(), m_waterSurfaceGL, m_riverAtlasGL, m_hillDecalGL);
+}
+
+GLuint AssetManager::getTerrainDetailGL(int terrainType) const {
+    auto it = m_terrainDetailGL.find(terrainType);
+    return (it != m_terrainDetailGL.end()) ? it->second : 0;
 }
 
 GLuint AssetManager::getTerrainTextureGL(int terrainType) const {

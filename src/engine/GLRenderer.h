@@ -109,6 +109,11 @@ private:
                   GLuint tex = 0, float u0 = 0, float v0 = 0, float u1 = 1, float v1 = 1);
     void pushLine(float x1, float y1, float x2, float y2,
                   float thickness, float r, float g, float b, float a);
+    // Push a quad with per-corner alpha (for gradient terrain blending)
+    void pushQuadAlphaGrad(float x, float y, float w, float h,
+                           float r, float g, float b,
+                           float aTL, float aTR, float aBL, float aBR,
+                           GLuint tex, float u0, float v0, float u1, float v1);
     void flushBatch();
     void setProjectionOrtho(); // set orthographic projection for current window size
 

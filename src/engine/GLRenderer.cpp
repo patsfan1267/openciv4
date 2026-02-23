@@ -274,6 +274,22 @@ void GLRenderer::pushLine(float x1, float y1, float x2, float y2,
     m_batchVerts.insert(m_batchVerts.end(), verts, verts + 48);
 }
 
+void GLRenderer::pushQuadAlphaGrad(float x, float y, float w, float h,
+                                    float r, float g, float b,
+                                    float aTL, float aTR, float aBL, float aBR,
+                                    GLuint tex, float u0, float v0, float u1, float v1) {
+    // 6 vertices (2 triangles) with per-corner alpha for gradient blending
+    float verts[] = {
+        x,     y,     u0, v0, r, g, b, aTL,   // top-left
+        x,     y + h, u0, v1, r, g, b, aBL,   // bottom-left
+        x + w, y + h, u1, v1, r, g, b, aBR,   // bottom-right
+        x,     y,     u0, v0, r, g, b, aTL,   // top-left
+        x + w, y + h, u1, v1, r, g, b, aBR,   // bottom-right
+        x + w, y,     u1, v0, r, g, b, aTR,   // top-right
+    };
+    m_batchVerts.insert(m_batchVerts.end(), verts, verts + 48);
+}
+
 void GLRenderer::flushBatch() {
     if (m_batchVerts.empty()) return;
 
@@ -831,19 +847,20 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
             if (screenTX + screenTileSize < 0 || screenTX > m_windowW ||
                 screenTY + screenTileSize < 0 || screenTY > m_windowH) continue;
 
-            // Fog of war brightness: 0.45 for revealed-but-not-visible, 1.0 for visible
-            // Fog of war: vis=1 = revealed but not currently visible
-            // TODO: re-enable dimming once proper fog of war is implemented
-            float fogBright = 1.0f;
+            // Fog of war: dim revealed-but-not-currently-visible tiles
+            float fogBright = (plot.visibility == 1) ? 0.45f : 1.0f;
 
             bool isWater = (plot.terrainType == 5 || plot.terrainType == 6); // COAST=5, OCEAN=6
 
             if (haveBlend) {
                 if (isWater) {
-                    // Water tiles: use procedural water texture with scrolling UVs
-                    GLuint waterTex = (plot.terrainType == 6)
-                        ? m_assets->getOceanWaterGL()
-                        : m_assets->getCoastWaterGL();
+                    // Water tiles: prefer real water.dds, fallback to procedural
+                    GLuint waterTex = m_assets->getWaterSurfaceGL();
+                    if (!waterTex) {
+                        waterTex = (plot.terrainType == 6)
+                            ? m_assets->getOceanWaterGL()
+                            : m_assets->getCoastWaterGL();
+                    }
                     if (waterTex) {
                         if (waterTex != curBoundTex) {
                             flushBatch();
@@ -851,14 +868,19 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                             m_shader.setInt("uUseTexture", 1);
                             curBoundTex = waterTex;
                         }
-                        // Scrolling UV for wave animation (texture tiles seamlessly)
+                        // Scrolling UV for wave animation
                         float timeS = SDL_GetTicks() * 0.00004f;
                         float u0 = (float)x * 0.5f + timeS;
                         float v0 = (float)y * 0.5f + timeS * 0.7f;
                         float u1 = u0 + 0.5f;
                         float v1 = v0 + 0.5f;
+                        // Ocean is slightly darker/bluer than coast
+                        float wR = (plot.terrainType == 6) ? 0.6f : 0.75f;
+                        float wG = (plot.terrainType == 6) ? 0.65f : 0.85f;
+                        float wB = (plot.terrainType == 6) ? 0.85f : 0.95f;
                         pushQuad(screenTX, screenTY, screenTileSize, screenTileSize,
-                                 fogBright, fogBright, fogBright, 1.0f, waterTex, u0, v0, u1, v1);
+                                 wR * fogBright, wG * fogBright, wB * fogBright, 1.0f,
+                                 waterTex, u0, v0, u1, v1);
                     } else {
                         // Fallback: solid water color
                         float r, g, b;
@@ -921,33 +943,62 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
     }
     flushBatch();
 
-    // --- Pass 1a: Terrain edge blending ---
-    // Where two different terrains meet, the higher-LayerOrder terrain bleeds
-    // into the lower one as an alpha-faded strip along the shared edge.
+    // --- Pass 1a: Terrain edge blending (corner-weighted alpha) ---
+    // For each tile, higher-LayerOrder neighboring terrains bleed in with
+    // per-corner alpha based on how many of 3 corner-adjacent neighbors
+    // share that terrain type. Creates smooth gradient transitions.
     if (haveBlend) {
-        // LayerOrder per terrain type (from CIV4ArtDefines_Terrain.xml)
-        auto getLayerOrder = [](int terrainType, int plotType) -> int {
-            if (plotType == 0) return 80; // Peak
-            if (plotType == 1) return 79; // Hill
-            switch (terrainType) {
-                case 0: return 4;  // Grass
-                case 1: return 3;  // Plains
-                case 2: return 2;  // Desert
-                case 3: return 1;  // Tundra
-                case 4: return 5;  // Snow/Ice
-                case 5: return 50; // Coast
-                case 6: return 60; // Ocean
+        // Effective blend key: terrain type, or -1/-2 for peak/hill
+        auto getTerrainKey = [](const PlotData& p) -> int {
+            if (p.plotType == 0) return -1; // Peak
+            if (p.plotType == 1) return -2; // Hill
+            return p.terrainType;
+        };
+
+        // LayerOrder from CIV4ArtDefines_Terrain.xml
+        auto layerForKey = [](int key) -> int {
+            switch (key) {
+                case -1: return 80; // Peak
+                case -2: return 79; // Hill
+                case 0: return 4;   // Grass
+                case 1: return 3;   // Plains
+                case 2: return 2;   // Desert
+                case 3: return 1;   // Tundra
+                case 4: return 5;   // Snow
+                case 5: return 50;  // Coast
+                case 6: return 60;  // Ocean
                 default: return 0;
             }
+        };
+
+        // Safely get a neighbor plot (handles wrapping and out-of-bounds)
+        auto getNeighbor = [&](int px, int py) -> const PlotData* {
+            if (snapshot.wrapX) px = ((px % snapshot.width) + snapshot.width) % snapshot.width;
+            if (snapshot.wrapY) py = ((py % snapshot.height) + snapshot.height) % snapshot.height;
+            if (px < 0 || px >= snapshot.width || py < 0 || py >= snapshot.height) return nullptr;
+            return &snapshot.getPlot(px, py);
         };
 
         curBoundTex = 0;
         beginBatch();
         m_shader.setInt("uUseTexture", 1);
 
-        // Neighbor offsets: N(+Y), E(+X), S(-Y), W(-X)
-        int nDx[4] = {0, +1, 0, -1};
-        int nDy[4] = {+1, 0, -1, 0};
+        // 8 neighbor directions: N, NE, E, SE, S, SW, W, NW (game coords)
+        static const int ndx[8] = {0, 1, 1, 1, 0, -1, -1, -1};
+        static const int ndy[8] = {1, 1, 0, -1, -1, -1, 0, 1};
+
+        // Corner→neighbor mapping (screen: TL=NW, TR=NE, BL=SW, BR=SE)
+        // Each corner touches 3 neighbors:
+        //   TL(NW): N=0, NW=7, W=6
+        //   TR(NE): N=0, NE=1, E=2
+        //   BL(SW): S=4, SW=5, W=6
+        //   BR(SE): S=4, SE=3, E=2
+        static const int cornerNbr[4][3] = {
+            {0, 7, 6}, // TL: N, NW, W
+            {0, 1, 2}, // TR: N, NE, E
+            {4, 5, 6}, // BL: S, SW, W
+            {4, 3, 2}, // BR: S, SE, E
+        };
 
         for (int vr = rowStart; vr <= rowEnd; vr++) {
             for (int vc = colStart; vc <= colEnd; vc++) {
@@ -957,8 +1008,10 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                 if (x < 0 || x >= snapshot.width || y < 0 || y >= snapshot.height) continue;
 
                 const PlotData& plot = snapshot.getPlot(x, y);
-                if (plot.visibility == 0) continue; // skip unseen
-                int myOrder = getLayerOrder(plot.terrainType, plot.plotType);
+                if (plot.visibility == 0) continue;
+
+                int myKey = getTerrainKey(plot);
+                int myOrder = layerForKey(myKey);
 
                 float worldTX = vc * TILE_SIZE;
                 float worldTY = vr * TILE_SIZE;
@@ -967,76 +1020,100 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                 if (screenTX + screenTileSize < 0 || screenTX > m_windowW ||
                     screenTY + screenTileSize < 0 || screenTY > m_windowH) continue;
 
-                // Fog of war: vis=1 = revealed but not currently visible
-            // TODO: re-enable dimming once proper fog of war is implemented
-            float fogBright = 1.0f;
-                // Check each edge: if neighbor has higher priority, blend their texture into this tile
-                for (int e = 0; e < 4; e++) {
-                    int nx = x + nDx[e], ny = y + nDy[e];
-                    if (snapshot.wrapX) nx = ((nx % snapshot.width) + snapshot.width) % snapshot.width;
-                    if (snapshot.wrapY) ny = ((ny % snapshot.height) + snapshot.height) % snapshot.height;
-                    if (nx < 0 || nx >= snapshot.width || ny < 0 || ny >= snapshot.height) continue;
+                float fogBright = (plot.visibility == 1) ? 0.45f : 1.0f;
 
-                    const PlotData& nplot = snapshot.getPlot(nx, ny);
-                    int nOrder = getLayerOrder(nplot.terrainType, nplot.plotType);
-                    if (nOrder <= myOrder) continue; // only blend from higher to lower
-
-                    // For water-to-land transitions, use procedural water texture
-                    bool neighborIsWater = (nplot.terrainType == 5 || nplot.terrainType == 6);
-                    GLuint nTex = 0;
-                    if (neighborIsWater) {
-                        nTex = (nplot.terrainType == 6)
-                            ? m_assets->getOceanWaterGL()
-                            : m_assets->getCoastWaterGL();
+                // Get 8 neighbors' terrain keys and layer orders
+                int nKeys[8], nOrders[8];
+                for (int i = 0; i < 8; i++) {
+                    const PlotData* np = getNeighbor(x + ndx[i], y + ndy[i]);
+                    if (np && np->visibility > 0) {
+                        nKeys[i] = getTerrainKey(*np);
+                        nOrders[i] = layerForKey(nKeys[i]);
                     } else {
-                        int nBlendKey = nplot.terrainType;
-                        if (nplot.plotType == 0) nBlendKey = -1;
-                        else if (nplot.plotType == 1) nBlendKey = -2;
-                        nTex = m_assets->getTerrainBlendGL(nBlendKey);
-                        if (!nTex) nTex = m_assets->getTerrainBlendGL(nplot.terrainType);
+                        nKeys[i] = myKey;
+                        nOrders[i] = myOrder;
                     }
-                    if (!nTex) continue;
+                }
 
-                    if (nTex != curBoundTex) {
+                // Collect unique higher-layer terrain types
+                struct BlendEntry { int key; int order; };
+                BlendEntry blends[8];
+                int numBlends = 0;
+                for (int i = 0; i < 8; i++) {
+                    if (nOrders[i] > myOrder) {
+                        bool found = false;
+                        for (int j = 0; j < numBlends; j++) {
+                            if (blends[j].key == nKeys[i]) { found = true; break; }
+                        }
+                        if (!found && numBlends < 8)
+                            blends[numBlends++] = {nKeys[i], nOrders[i]};
+                    }
+                }
+                if (numBlends == 0) continue;
+
+                // Sort by layer order ascending (lowest drawn first, highest on top)
+                for (int i = 1; i < numBlends; i++) {
+                    auto tmp = blends[i];
+                    int j = i - 1;
+                    while (j >= 0 && blends[j].order > tmp.order) {
+                        blends[j + 1] = blends[j]; j--;
+                    }
+                    blends[j + 1] = tmp;
+                }
+
+                // Draw blend overlay for each higher-layer terrain
+                for (int b = 0; b < numBlends; b++) {
+                    int bKey = blends[b].key;
+
+                    // Compute corner alphas: count how many of 3 corner-neighbors have this terrain
+                    float corners[4];
+                    for (int c = 0; c < 4; c++) {
+                        int count = 0;
+                        for (int n = 0; n < 3; n++) {
+                            if (nKeys[cornerNbr[c][n]] == bKey) count++;
+                        }
+                        corners[c] = count / 3.0f;
+                    }
+
+                    if (corners[0] < 0.01f && corners[1] < 0.01f &&
+                        corners[2] < 0.01f && corners[3] < 0.01f) continue;
+
+                    // Get texture for the blending terrain
+                    bool isWater = (bKey == 5 || bKey == 6);
+                    GLuint bTex;
+                    if (isWater) {
+                        bTex = (bKey == 6) ? m_assets->getOceanWaterGL() : m_assets->getCoastWaterGL();
+                    } else {
+                        bTex = m_assets->getTerrainBlendGL(bKey);
+                    }
+                    if (!bTex) continue;
+
+                    if (bTex != curBoundTex) {
                         flushBatch();
-                        glBindTexture(GL_TEXTURE_2D, nTex);
-                        curBoundTex = nTex;
+                        glBindTexture(GL_TEXTURE_2D, bTex);
+                        curBoundTex = bTex;
                     }
 
-                    // Blend strip on the edge facing the neighbor
-                    float blendFrac = neighborIsWater ? 0.25f : 0.25f;
-                    float bx = screenTX, by = screenTY, bw = screenTileSize, bh = screenTileSize;
-                    float alpha = neighborIsWater ? 0.35f : 0.35f;
-
-                    // UV for the blend strip (use neighbor tile coords for continuity)
-                    float tilesPerTex = 2.0f;
-                    float nu0 = (float)nx / tilesPerTex;
-                    float nv0 = (float)ny / tilesPerTex;
-                    float nu1 = nu0 + 1.0f / tilesPerTex;
-                    float nv1 = nv0 + 1.0f / tilesPerTex;
-
-                    switch (e) {
-                        case 0: // North neighbor (top edge of tile)
-                            bh = screenTileSize * blendFrac;
-                            nv1 = nv0 + (nv1 - nv0) * blendFrac;
-                            break;
-                        case 1: // East neighbor (right edge)
-                            bx = screenTX + screenTileSize * (1.0f - blendFrac);
-                            bw = screenTileSize * blendFrac;
-                            nu0 = nu1 - (nu1 - nu0) * blendFrac;
-                            break;
-                        case 2: // South neighbor (bottom edge)
-                            by = screenTY + screenTileSize * (1.0f - blendFrac);
-                            bh = screenTileSize * blendFrac;
-                            nv0 = nv1 - (nv1 - nv0) * blendFrac;
-                            break;
-                        case 3: // West neighbor (left edge)
-                            bw = screenTileSize * blendFrac;
-                            nu1 = nu0 + (nu1 - nu0) * blendFrac;
-                            break;
+                    // UVs: world-space tiling for seamless continuity
+                    float u0, v0, u1, v1;
+                    if (isWater) {
+                        float timeS = SDL_GetTicks() * 0.00004f;
+                        u0 = (float)x * 0.5f + timeS;
+                        v0 = (float)y * 0.5f + timeS * 0.7f;
+                        u1 = u0 + 0.5f;
+                        v1 = v0 + 0.5f;
+                    } else {
+                        float tilesPerTex = 4.0f;
+                        u0 = (float)x / tilesPerTex;
+                        v0 = (float)y / tilesPerTex;
+                        u1 = u0 + 1.0f / tilesPerTex;
+                        v1 = v0 + 1.0f / tilesPerTex;
                     }
 
-                    pushQuad(bx, by, bw, bh, fogBright, fogBright, fogBright, alpha, nTex, nu0, nv0, nu1, nv1);
+                    pushQuadAlphaGrad(screenTX, screenTY, screenTileSize, screenTileSize,
+                                      fogBright, fogBright, fogBright,
+                                      corners[0], corners[1], corners[2], corners[3],
+                                      bTex, u0, v0, u1, v1);
                 }
             }
         }
@@ -1044,21 +1121,20 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
     }
 
     // --- Pass 1b: Feature texture overlays ---
-    if (haveBlend) {
+    // All 6 feature types: 0=Ice, 1=Jungle, 2=Oasis, 3=FloodPlains, 4=Forest, 5=Fallout
+    if (m_assets) {
         curBoundTex = 0;
         beginBatch();
         m_shader.setInt("uUseTexture", 1);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
         for (int vr = rowStart; vr <= rowEnd; vr++) {
             for (int vc = colStart; vc <= colEnd; vc++) {
                 int x = snapshot.wrapX ? ((vc % snapshot.width) + snapshot.width) % snapshot.width : vc;
-                int fr = snapshot.wrapY ? ((vr % snapshot.height) + snapshot.height) % snapshot.height : vr;
-                int y = snapshot.height - 1 - fr;
+                int fr2 = snapshot.wrapY ? ((vr % snapshot.height) + snapshot.height) % snapshot.height : vr;
+                int y = snapshot.height - 1 - fr2;
                 if (x < 0 || x >= snapshot.width || y < 0 || y >= snapshot.height) continue;
                 const PlotData& plot = snapshot.getPlot(x, y);
-                if (plot.visibility == 0) continue; // skip unseen tiles
+                if (plot.visibility == 0) continue;
                 if (plot.featureType < 0) continue;
 
                 float worldTX = vc * TILE_SIZE;
@@ -1068,24 +1144,163 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                 if (screenTX + screenTileSize < 0 || screenTX > m_windowW ||
                     screenTY + screenTileSize < 0 || screenTY > m_windowH) continue;
 
+                // Try blend texture first (Forest/Jungle), then button icon (Ice/Oasis/FloodPlains/Fallout)
                 GLuint ftex = m_assets->getFeatureBlendGL(plot.featureType);
-                if (!ftex) continue; // skip features without blend textures (no button icon fallback)
+                float alpha = 0.75f;
+                bool useTiling = true; // blend textures tile, icons don't
+
+                if (!ftex) {
+                    ftex = m_assets->getFeatureTextureGL(plot.featureType);
+                    useTiling = false;
+                    // Per-feature alpha and rendering style
+                    switch (plot.featureType) {
+                        case 0: alpha = 0.65f; break; // Ice: semi-transparent white/blue
+                        case 2: alpha = 0.80f; break; // Oasis: visible palm/water
+                        case 3: alpha = 0.55f; break; // Flood Plains: subtle green overlay
+                        case 5: alpha = 0.50f; break; // Fallout: semi-transparent gray
+                        default: alpha = 0.60f; break;
+                    }
+                }
+                if (!ftex) continue;
 
                 if (ftex != curBoundTex) {
                     flushBatch();
                     glBindTexture(GL_TEXTURE_2D, ftex);
                     curBoundTex = ftex;
                 }
-                float tilesPerTex = 2.0f;
-                float u0 = (float)x / tilesPerTex;
-                float v0 = (float)y / tilesPerTex;
-                float u1 = u0 + 1.0f / tilesPerTex;
-                float v1 = v0 + 1.0f / tilesPerTex;
+
+                float u0, v0, u1, v1;
+                if (useTiling) {
+                    // Blend textures: world-space UV tiling
+                    float tilesPerTex = 2.0f;
+                    u0 = (float)x / tilesPerTex;
+                    v0 = (float)y / tilesPerTex;
+                    u1 = u0 + 1.0f / tilesPerTex;
+                    v1 = v0 + 1.0f / tilesPerTex;
+                } else {
+                    // Button icons: stretch to fill tile
+                    u0 = 0; v0 = 0; u1 = 1; v1 = 1;
+                }
+
+                // Tint color per feature type for visual variety
+                float tintR = 1.0f, tintG = 1.0f, tintB = 1.0f;
+                if (!useTiling) {
+                    switch (plot.featureType) {
+                        case 0: tintR = 0.85f; tintG = 0.90f; tintB = 1.0f; break; // Ice: blue-white tint
+                        case 3: tintR = 0.80f; tintG = 0.90f; tintB = 0.70f; break; // Flood plains: green-ish
+                        case 5: tintR = 0.70f; tintG = 0.65f; tintB = 0.50f; break; // Fallout: brown-gray
+                    }
+                }
+
                 pushQuad(screenTX, screenTY, screenTileSize, screenTileSize,
-                         1.0f, 1.0f, 1.0f, 0.6f, ftex, u0, v0, u1, v1);
+                         tintR, tintG, tintB, alpha, ftex, u0, v0, u1, v1);
             }
         }
         flushBatch();
+    }
+
+    // --- Pass 1b2: Detail texture overlays (visible when zoomed in) ---
+    // Fine-scale terrain detail that fades in at higher zoom levels
+    if (m_assets && screenTileSize >= 20.0f) {
+        float detailAlpha = std::min((screenTileSize - 20.0f) / 60.0f * 0.3f, 0.3f);
+        if (detailAlpha > 0.01f) {
+            curBoundTex = 0;
+            beginBatch();
+            m_shader.setInt("uUseTexture", 1);
+
+            for (int vr = rowStart; vr <= rowEnd; vr++) {
+                for (int vc = colStart; vc <= colEnd; vc++) {
+                    int x = snapshot.wrapX ? ((vc % snapshot.width) + snapshot.width) % snapshot.width : vc;
+                    int frd = snapshot.wrapY ? ((vr % snapshot.height) + snapshot.height) % snapshot.height : vr;
+                    int y = snapshot.height - 1 - frd;
+                    if (x < 0 || x >= snapshot.width || y < 0 || y >= snapshot.height) continue;
+                    const PlotData& plot = snapshot.getPlot(x, y);
+                    if (plot.visibility == 0) continue;
+                    bool isWater = (plot.terrainType == 5 || plot.terrainType == 6);
+                    if (isWater) continue; // water has its own detail via UV animation
+
+                    GLuint dtex = m_assets->getTerrainDetailGL(plot.terrainType);
+                    if (!dtex) continue;
+
+                    float worldTX = vc * TILE_SIZE;
+                    float worldTY = vr * TILE_SIZE;
+                    float screenTX = (worldTX - m_camera.offsetX) * m_camera.zoom;
+                    float screenTY = (worldTY - m_camera.offsetY) * m_camera.zoom;
+                    if (screenTX + screenTileSize < 0 || screenTX > m_windowW ||
+                        screenTY + screenTileSize < 0 || screenTY > m_windowH) continue;
+
+                    if (dtex != curBoundTex) {
+                        flushBatch();
+                        glBindTexture(GL_TEXTURE_2D, dtex);
+                        curBoundTex = dtex;
+                    }
+
+                    // High-frequency tiling for fine detail
+                    float detailTiles = 8.0f;
+                    float du0 = (float)x * detailTiles;
+                    float dv0 = (float)y * detailTiles;
+                    float du1 = du0 + detailTiles;
+                    float dv1 = dv0 + detailTiles;
+
+                    pushQuad(screenTX, screenTY, screenTileSize, screenTileSize,
+                             1.0f, 1.0f, 1.0f, detailAlpha, dtex, du0, dv0, du1, dv1);
+                }
+            }
+            flushBatch();
+        }
+    }
+
+    // --- Pass 1c: Rivers (textured water strips) ---
+    {
+        GLuint riverTex = m_assets ? m_assets->getWaterSurfaceGL() : 0;
+        if (riverTex && screenTileSize >= 4) {
+            beginBatch();
+            glBindTexture(GL_TEXTURE_2D, riverTex);
+            m_shader.setInt("uUseTexture", 1);
+
+            float timeS = SDL_GetTicks() * 0.00005f; // gentle flow animation
+
+            for (int vr = rowStart; vr <= rowEnd; vr++) {
+                for (int vc = colStart; vc <= colEnd; vc++) {
+                    int x = snapshot.wrapX ? ((vc % snapshot.width) + snapshot.width) % snapshot.width : vc;
+                    int fr2 = snapshot.wrapY ? ((vr % snapshot.height) + snapshot.height) % snapshot.height : vr;
+                    int y = snapshot.height - 1 - fr2;
+                    if (x < 0 || x >= snapshot.width || y < 0 || y >= snapshot.height) continue;
+                    const PlotData& plot = snapshot.getPlot(x, y);
+                    if (plot.visibility == 0) continue;
+                    if (!plot.isNOfRiver && !plot.isWOfRiver) continue;
+
+                    float worldTX = vc * TILE_SIZE;
+                    float worldTY = vr * TILE_SIZE;
+                    float screenTX = (worldTX - m_camera.offsetX) * m_camera.zoom;
+                    float screenTY = (worldTY - m_camera.offsetY) * m_camera.zoom;
+                    if (screenTX + screenTileSize < 0 || screenTX > m_windowW ||
+                        screenTY + screenTileSize < 0 || screenTY > m_windowH) continue;
+
+                    float riverThk = std::max(3.0f, screenTileSize * 0.15f);
+
+                    if (plot.isNOfRiver) {
+                        // Horizontal river strip along north edge
+                        float ru0 = (float)x * 0.5f + timeS;
+                        float rv0 = (float)y * 0.3f;
+                        float ru1 = ru0 + 0.5f;
+                        float rv1 = rv0 + 0.15f;
+                        pushQuad(screenTX, screenTY - riverThk * 0.5f, screenTileSize, riverThk,
+                                 0.35f, 0.55f, 0.85f, 0.9f, riverTex, ru0, rv0, ru1, rv1);
+                    }
+                    if (plot.isWOfRiver) {
+                        // Vertical river strip along west edge
+                        float ru0 = (float)x * 0.3f;
+                        float rv0 = (float)y * 0.5f + timeS;
+                        float ru1 = ru0 + 0.15f;
+                        float rv1 = rv0 + 0.5f;
+                        pushQuad(screenTX - riverThk * 0.5f, screenTY, riverThk, screenTileSize,
+                                 0.35f, 0.55f, 0.85f, 0.9f, riverTex, ru0, rv0, ru1, rv1);
+                    }
+                }
+            }
+            flushBatch();
+        }
     }
 
     // --- Pass 2: Overlays (colored, non-textured) ---
@@ -1120,9 +1335,13 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                          plot.ownerColorR / 255.0f, plot.ownerColorG / 255.0f, plot.ownerColorB / 255.0f, fogAlpha);
             }
 
-            // Hills darkening (only when using textures — without textures, the base color already differs)
-            if (plot.plotType == 1 && !haveBlend) {
-                pushQuad(screenTX, screenTY, screenTileSize, screenTileSize, 0, 0, 0, 0.15f);
+            // Hills: subtle shadow overlay for depth
+            if (plot.plotType == 1) {
+                pushQuad(screenTX, screenTY, screenTileSize, screenTileSize, 0, 0, 0, 0.12f);
+            }
+            // Peaks: slight snow-cap brightening
+            if (plot.plotType == 0) {
+                pushQuad(screenTX, screenTY, screenTileSize, screenTileSize, 0.9f, 0.92f, 0.95f, 0.15f);
             }
 
             // Grid
@@ -1132,16 +1351,7 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                 pushQuad(screenTX, screenTY, lw, screenTileSize, 0.16f, 0.16f, 0.2f, 1);
             }
 
-            // Rivers — drawn as semi-transparent blue strips along tile edges
-            if (screenTileSize >= 4) {
-                float riverThk = std::max(3.0f, screenTileSize * 0.12f);
-                if (plot.isNOfRiver)
-                    pushQuad(screenTX, screenTY - riverThk * 0.5f, screenTileSize, riverThk,
-                             0.12f, 0.35f, 0.65f, 0.85f);
-                if (plot.isWOfRiver)
-                    pushQuad(screenTX - riverThk * 0.5f, screenTY, riverThk, screenTileSize,
-                             0.12f, 0.35f, 0.65f, 0.85f);
-            }
+            // Rivers are now rendered in Pass 1c (textured water strips)
 
             // Territory borders
             if (plot.ownerID >= 0 && screenTileSize >= 3) {
@@ -1166,23 +1376,7 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                 }
             }
 
-            // Feature overlays (colored tint for features without blend textures)
-            if (plot.featureType >= 0 && screenTileSize >= 6) {
-                bool hasBlendTex = haveBlend && m_assets && m_assets->getFeatureBlendGL(plot.featureType);
-                if (!hasBlendTex) {
-                    // Subtle full-tile tint for features without blend textures
-                    // 0=ICE, 1=JUNGLE, 2=OASIS, 3=FLOOD_PLAINS, 4=FOREST, 5=FALLOUT
-                    float fr = 0, fg = 0, fb = 0, fa = 0;
-                    switch (plot.featureType) {
-                        case 0: fr=0.70f; fg=0.82f; fb=0.95f; fa=0.35f; break; // Ice: white-blue tint
-                        case 2: fr=0.10f; fg=0.50f; fb=0.50f; fa=0.25f; break; // Oasis: cyan tint
-                        case 3: fr=0.30f; fg=0.50f; fb=0.15f; fa=0.20f; break; // Flood plains: green-brown
-                        case 5: fr=0.35f; fg=0.30f; fb=0.15f; fa=0.30f; break; // Fallout: grey-brown
-                    }
-                    if (fa > 0)
-                        pushQuad(screenTX, screenTY, screenTileSize, screenTileSize, fr, fg, fb, fa);
-                }
-            }
+            // Feature overlays now handled in Pass 1b (textured)
 
             // City marker (only on currently visible tiles)
             if (plot.isCity && plot.visibility == 2 && screenTileSize >= 3) {

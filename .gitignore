@@ -11,6 +11,9 @@ build/
 # Trace/debug logs
 trace*.log
 
+# Run output logs
+run*.txt
+
 # IDE files
 .vs/
 *.suo

@@ -157,10 +157,11 @@ void FAStar::addToOpen(FAStarNode* pNode)
         pCurr->m_pNext = pNode;
     }
 
-    // Notify callback
+    // Notify callback — BTS convention: (parent, node, data, ...)
+    // where 'node' is the tile being added to the list.
     if (m_notifyListFunc)
     {
-        m_notifyListFunc(pNode, pNode->m_pParent, ASNL_ADDOPEN, m_pData, this);
+        m_notifyListFunc(pNode->m_pParent, pNode, ASNL_ADDOPEN, m_pData, this);
     }
 }
 
@@ -175,6 +176,14 @@ FAStarNode* FAStar::popBestOpen()
     pBest->m_pNext = nullptr;
     pBest->m_pPrev = nullptr;
     pBest->m_eFAStarListType = FASTARLIST_CLOSED;
+
+    // Notify callback that this node is now on the closed list.
+    // Critical for joinArea() which assigns area IDs only on ASNL_ADDCLOSED.
+    // BTS convention: (parent, node, data, ...) where 'node' is the current tile.
+    if (m_notifyListFunc)
+    {
+        m_notifyListFunc(pBest->m_pParent, pBest, ASNL_ADDCLOSED, m_pData, this);
+    }
 
     return pBest;
 }

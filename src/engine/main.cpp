@@ -135,9 +135,10 @@ int main(int argc, char* argv[])
         // Game type: single player new game
         initCore.setType(GAME_SP_NEW);
 
-        // World size: TINY (index 1 in standard BTS: 0=Duel,1=Tiny,2=Small,3=Standard,4=Large,5=Huge)
-        // Note: Small+ maps sometimes crash on certain map seeds (non-deterministic)
-        initCore.setWorldSize((WorldSizeTypes)1);
+        // World size: STANDARD (index 3 in standard BTS: 0=Duel,1=Tiny,2=Small,3=Standard,4=Large,5=Huge)
+        // Tiny (13x8=104 plots) is too small for 4 players — MIN_CITY_RANGE blocks nearly
+        // all potential second-city sites. Standard (21x13=273) gives room for expansion.
+        initCore.setWorldSize((WorldSizeTypes)3);
 
         // Climate: TEMPERATE (index 1 in standard BTS)
         initCore.setClimate((ClimateTypes)1);
@@ -189,6 +190,35 @@ int main(int argc, char* argv[])
 
         // Set game handicap (global difficulty)
         initCore.setHandicap(BARBARIAN_PLAYER, eHandicap);
+
+        // ---- Initialize barbarian player (index 18) ----
+        // Without this, CvGame::doTurn() -> createBarbarianCities()/createBarbarianUnits()
+        // accesses GET_PLAYER(BARBARIAN_PLAYER) which has NO_CIVILIZATION, causing
+        // getCivilizationInfo(-1) -> out-of-bounds array access -> SEGFAULT.
+        {
+            CivilizationTypes eBarbCiv = (CivilizationTypes)GC.getDefineINT("BARBARIAN_CIVILIZATION");
+            LeaderHeadTypes eBarbLeader = (LeaderHeadTypes)GC.getDefineINT("BARBARIAN_LEADER");
+
+            if (eBarbCiv != NO_CIVILIZATION && eBarbLeader != NO_LEADER)
+            {
+                initCore.setSlotStatus(BARBARIAN_PLAYER, SS_COMPUTER);
+                initCore.setCiv(BARBARIAN_PLAYER, eBarbCiv);
+                initCore.setLeader(BARBARIAN_PLAYER, eBarbLeader);
+                initCore.setTeam(BARBARIAN_PLAYER, BARBARIAN_TEAM);
+                // Use a color that doesn't conflict with regular players.
+                // PlayerColorTypes count is usually > MAX_CIV_PLAYERS, pick the last one.
+                initCore.setColor(BARBARIAN_PLAYER, (PlayerColorTypes)(GC.getNumPlayerColorInfos() - 1));
+
+                fprintf(stderr, "[main]   Barbarian player (slot %d): civ=%d leader=%d team=%d\n",
+                        (int)BARBARIAN_PLAYER, (int)eBarbCiv, (int)eBarbLeader, (int)BARBARIAN_TEAM);
+            }
+            else
+            {
+                fprintf(stderr, "[main]   WARNING: Could not find barbarian civ (%d) or leader (%d), "
+                        "disabling barbarians\n", (int)eBarbCiv, (int)eBarbLeader);
+                initCore.setOption(GAMEOPTION_NO_BARBARIANS, true);
+            }
+        }
     }
     fprintf(stderr, "[main] Game configured.\n\n");
 
@@ -220,6 +250,14 @@ int main(int argc, char* argv[])
     CvMapGenerator::GetInstance().addGameElements();
     fprintf(stderr, "[main] Game elements added.\n");
 
+    // Update cached plot yields — CvPlot::getYield() returns m_aiYield[] which
+    // starts at 0. updateYield() calculates the real value from terrain, features,
+    // bonuses, etc. and caches it. Without this, AI_foundValue() sees all-zero
+    // yields and never identifies valid city sites → no settlers ever built.
+    fprintf(stderr, "[main] Updating plot yields...\n");
+    GC.getMapINLINE().updateYield();
+    fprintf(stderr, "[main] Plot yields updated.\n");
+
     // Initialize teams and players
     fprintf(stderr, "[main] Initializing teams and players...\n");
     for (int i = 0; i < MAX_TEAMS; i++)
@@ -244,6 +282,10 @@ int main(int argc, char* argv[])
     GC.getGameINLINE().setInitialItems();
     fprintf(stderr, "[main] Initial items set.\n\n");
 
+    // Recalculate score maximums now that the map is generated
+    // (CvGame::init called initScoreCalculation before the map existed)
+    GC.getGameINLINE().initScoreCalculation();
+
     // Mark game as ready
     GC.getGameINLINE().setFinalInitialized(true);
 
@@ -251,14 +293,34 @@ int main(int argc, char* argv[])
     GC.getInitCore().setActivePlayer((PlayerTypes)0);
     fprintf(stderr, "[main] Active player set to 0.\n");
 
-    // Debug: print starting positions and unit locations
+    // Reveal all plots for all teams.  In a real BTS game, fog of war is
+    // peeled away incrementally as units explore.  Our headless engine
+    // doesn't fully propagate visibility from units/cities, so the AI
+    // never reveals tiles beyond its starting area.  AI_foundValue()
+    // returns 0 for unrevealed plots → settlers are never trained.
+    // Revealing everything is equivalent to running with "debug mode" on.
+    fprintf(stderr, "[main] Revealing all plots for every team...\n");
+    for (int i = 0; i < GC.getMapINLINE().numPlotsINLINE(); i++)
+    {
+        CvPlot* pPlot = GC.getMapINLINE().plotByIndexINLINE(i);
+        for (int t = 0; t < MAX_TEAMS; t++)
+        {
+            if (GET_TEAM((TeamTypes)t).isAlive())
+            {
+                pPlot->setRevealed((TeamTypes)t, true, false, NO_TEAM, false);
+            }
+        }
+    }
+    fprintf(stderr, "[main] All plots revealed.\n");
+
+    // Print starting positions
     for (int p = 0; p < MAX_CIV_PLAYERS; p++)
     {
         CvPlayer& kPlayer = GET_PLAYER((PlayerTypes)p);
         if (kPlayer.isAlive())
         {
             CvPlot* pStart = kPlayer.getStartingPlot();
-            fprintf(stderr, "[main] P%d: startPlot=(%d,%d) units=%d\n",
+            fprintf(stderr, "[main] P%d: start=(%d,%d) units=%d\n",
                     p,
                     pStart ? pStart->getX_INLINE() : -1,
                     pStart ? pStart->getY_INLINE() : -1,
@@ -266,27 +328,49 @@ int main(int argc, char* argv[])
         }
     }
 
+    // Seed AI found values so the first production decision has valid city site data
+    for (int p = 0; p < MAX_CIV_PLAYERS; p++)
+    {
+        CvPlayerAI& kPlayer = GET_PLAYER((PlayerTypes)p);
+        if (kPlayer.isAlive())
+        {
+            kPlayer.AI_updateFoundValues();
+            int iSites = kPlayer.AI_getNumCitySites();
+            fprintf(stderr, "[main] P%d: %d city sites found after initial AI_updateFoundValues\n", p, iSites);
+        }
+    }
+
     // ---- Step 7: Run headless game loop ----
-    // We bypass CvGame::update() because it's designed for the GUI event loop.
-    // Instead, we directly simulate the turn sequence:
-    //   1. For each alive player: setTurnActive(true) → doTurn → doTurnUnits → AI_unitUpdate → setTurnActive(false)
-    //   2. CvGame::doTurn() to advance the game state
+    // Simulates the BTS sequential turn flow:
+    //   For each player in order:
+    //     1. doTurnUnits()    — refreshes AI found values, resets unit movement points
+    //     2. AI_unitUpdate()  — units execute AI (move, settle, attack)
+    //     3. doTurn()         — cities process production, AI chooses next build
+    //   Then CvGame::doTurn() advances the global game state.
     //
-    // CRITICAL: setTurnActive(true) must be called before AI processing!
-    // CvSelectionGroup::startMission() checks isTurnActive() and silently
-    // rejects all missions (including MISSION_FOUND for settlers) if false.
+    // This matches the real BTS flow in setTurnActive(true)/setTurnActive(false):
+    //   setTurnActive(true)  → doTurnUnits()  (line 9818 in CvPlayer.cpp)
+    //   updateMoves()        → AI_unitUpdate()
+    //   setTurnActive(false) → doTurn()       (line 9880 in CvPlayer.cpp)
     const int MAX_TURNS = 300;
     fprintf(stderr, "=== Starting headless game loop (max %d turns) ===\n", MAX_TURNS);
 
     for (int iTurn = 0; iTurn < MAX_TURNS; iTurn++)
     {
-        // Process each alive player's full turn
+        // Process each alive player's full turn (BTS sequential order)
         for (int p = 0; p < MAX_PLAYERS; p++)
         {
             CvPlayerAI& kPlayer = GET_PLAYER((PlayerTypes)p);
             if (kPlayer.isAlive())
             {
                 GC.getGameINLINE().setActivePlayer((PlayerTypes)p);
+
+                // Refresh AI found values before production decisions so the AI
+                // knows about valid city sites (needed for settler training).
+                ((CvPlayerAI&)kPlayer).AI_updateFoundValues();
+
+                // Turn processing: doTurn (cities produce), doTurnUnits (refresh
+                // movement), AI_unitUpdate (units act — settlers found, warriors move).
                 kPlayer.doTurn();
                 kPlayer.doTurnUnits();
                 kPlayer.AI_unitUpdate();
@@ -306,9 +390,10 @@ int main(int argc, char* argv[])
                 CvPlayer& kPlayer = GET_PLAYER((PlayerTypes)p);
                 if (kPlayer.isAlive())
                 {
-                    fprintf(stderr, "  P%d[c=%d u=%d pop=%d]", p,
+                    fprintf(stderr, "  P%d[c=%d u=%d pop=%d sc=%d]", p,
                             kPlayer.getNumCities(), kPlayer.getNumUnits(),
-                            kPlayer.getTotalPopulation());
+                            kPlayer.getTotalPopulation(),
+                            GC.getGameINLINE().getPlayerScore((PlayerTypes)p));
                 }
             }
             fprintf(stderr, "\n");
@@ -341,10 +426,11 @@ int main(int argc, char* argv[])
                     numTechs++;
             }
             const char* civType = GC.getCivilizationInfo(kPlayer.getCivilizationType()).getType();
-            fprintf(stderr, "  Player %d (%s): cities=%d units=%d pop=%d techs=%d\n",
+            fprintf(stderr, "  Player %d (%s): cities=%d units=%d pop=%d techs=%d score=%d\n",
                     i, civType ? civType : "???",
                     kPlayer.getNumCities(), kPlayer.getNumUnits(),
-                    kPlayer.getTotalPopulation(), numTechs);
+                    kPlayer.getTotalPopulation(), numTechs,
+                    GC.getGameINLINE().getPlayerScore((PlayerTypes)i));
         }
     }
 

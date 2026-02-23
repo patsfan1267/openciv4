@@ -1626,11 +1626,11 @@ int CvPlayerAI::AI_foundValue(int iX, int iY, int iMinRivalRange, bool bStarting
 	{
 		return 0;
 	}
-	
+
 	bIsCoastal = pPlot->isCoastalLand(GC.getMIN_WATER_SIZE_FOR_OCEAN());
 	pArea = pPlot->area();
 	iNumAreaCities = pArea->getCitiesPerPlayer(getID());
-	
+
 	bool bAdvancedStart = (getAdvancedStartPoints() >= 0);
 
 	if (!bStartingLoc && !bAdvancedStart)
@@ -1788,6 +1788,7 @@ int CvPlayerAI::AI_foundValue(int iX, int iY, int iMinRivalRange, bool bStarting
 	}
 
 	iBadTile /= 2;
+
 
 	if (!bStartingLoc)
 	{
@@ -2113,6 +2114,7 @@ int CvPlayerAI::AI_foundValue(int iX, int iY, int iMinRivalRange, bool bStarting
 		}
 	}
 
+
 	iResourceValue += iSpecialFood * 50;
 	iResourceValue += iSpecialProduction * 50;
 	iResourceValue += iSpecialCommerce * 50;
@@ -2334,6 +2336,7 @@ int CvPlayerAI::AI_foundValue(int iX, int iY, int iMinRivalRange, bool bStarting
 
 	pNearestCity = GC.getMapINLINE().findCity(iX, iY, ((isBarbarian()) ? NO_PLAYER : getID()));
 
+
 	if (pNearestCity != NULL)
 	{
 		if (isBarbarian())
@@ -2346,7 +2349,7 @@ int CvPlayerAI::AI_foundValue(int iX, int iY, int iMinRivalRange, bool bStarting
 		    int iNumCities = getNumCities();
 		    if (iDistance > 5)
 		    {
-		    	iValue -= (iDistance - 5) * 500;		    	
+		    	iValue -= (iDistance - 5) * 500;
 		    }
 		    else if (iDistance < 4)
 		    {

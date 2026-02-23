@@ -3046,6 +3046,51 @@ void CvPlayer::chooseTech(int iDiscover, CvWString szText, bool bFront)
 }
 
 
+// C++ implementation of getScoreComponent, mirroring the Python CvUtil.getScoreComponent formula.
+// Used as a fallback when the Python calculateScore callback returns 0 (stub not implemented).
+static int getScoreComponent(int iRawScore, int iInitial, int iMax, int iFactor,
+                             bool bExponential, bool bFinal, bool bVictory)
+{
+	int iEstimateEndTurn = GC.getGameINLINE().getEstimateEndTurn();
+	if (iEstimateEndTurn == 0)
+	{
+		return 0;
+	}
+
+	// For final victory scoring, scale the max based on how far through the game we are
+	if (bFinal && bVictory)
+	{
+		double fTurnRatio = (double)GC.getGameINLINE().getGameTurn() / (double)iEstimateEndTurn;
+		if (bExponential && iInitial != 0)
+		{
+			double fRatio = (double)iMax / (double)iInitial;
+			iMax = (int)(iInitial * pow(fRatio, fTurnRatio));
+		}
+		else
+		{
+			iMax = (int)(iInitial + fTurnRatio * (iMax - iInitial));
+		}
+	}
+
+	int iFree = (GC.getDefineINT("SCORE_FREE_PERCENT") * iMax) / 100;
+	int iScore;
+	if ((iFree + iMax) != 0)
+	{
+		iScore = (iFactor * (iRawScore + iFree)) / (iFree + iMax);
+	}
+	else
+	{
+		iScore = iFactor;
+	}
+
+	if (bVictory)
+	{
+		iScore = ((100 + GC.getDefineINT("SCORE_VICTORY_PERCENT")) * iScore) / 100;
+	}
+
+	return iScore;
+}
+
 int CvPlayer::calculateScore(bool bFinal, bool bVictory)
 {
 	PROFILE_FUNC();
@@ -3067,6 +3112,40 @@ int CvPlayer::calculateScore(bool bFinal, bool bVictory)
 	argsList.add(bFinal);
 	argsList.add(bVictory);
 	gDLL->getPythonIFace()->callFunction(PYGameModule, "calculateScore", argsList.makeFunctionArgs(), &lScore);
+
+	// C++ fallback: if Python returned 0 (stub not implemented), compute score natively
+	if (lScore == 0)
+	{
+		int iPopScore = getScoreComponent(
+			getPopScore(),
+			GC.getGameINLINE().getInitPopulation(),
+			GC.getGameINLINE().getMaxPopulation(),
+			GC.getDefineINT("SCORE_POPULATION_FACTOR"),
+			true, bFinal, bVictory);
+
+		int iLandScore = getScoreComponent(
+			getLandScore(),
+			GC.getGameINLINE().getInitLand(),
+			GC.getGameINLINE().getMaxLand(),
+			GC.getDefineINT("SCORE_LAND_FACTOR"),
+			true, bFinal, bVictory);
+
+		int iTechScore = getScoreComponent(
+			getTechScore(),
+			GC.getGameINLINE().getInitTech(),
+			GC.getGameINLINE().getMaxTech(),
+			GC.getDefineINT("SCORE_TECH_FACTOR"),
+			true, bFinal, bVictory);
+
+		int iWondersScore = getScoreComponent(
+			getWondersScore(),
+			GC.getGameINLINE().getInitWonders(),
+			GC.getGameINLINE().getMaxWonders(),
+			GC.getDefineINT("SCORE_WONDER_FACTOR"),
+			false, bFinal, bVictory);
+
+		lScore = iPopScore + iLandScore + iTechScore + iWondersScore;
+	}
 
 	return ((int)lScore);
 }

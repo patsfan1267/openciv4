@@ -37,6 +37,11 @@ if(MSVC)
     )
 endif()
 
+# --- SDL2 ---
+set(SDL2_DIR "${CMAKE_SOURCE_DIR}/third_party/SDL2")
+set(SDL2_INCLUDE_DIR "${SDL2_DIR}/include")
+set(SDL2_LIB_DIR "${SDL2_DIR}/lib/x64")
+
 # --- Engine host (our code) ---
 add_subdirectory(src/engine)
 
@@ -45,14 +50,19 @@ add_subdirectory(src/gamecore)
 
 # --- Main executable ---
 add_executable(openciv4 src/engine/main.cpp)
-target_link_libraries(openciv4 PRIVATE engine gamecore winmm)
-target_link_options(openciv4 PRIVATE /MAP)
+target_link_libraries(openciv4 PRIVATE engine gamecore winmm
+    "${SDL2_LIB_DIR}/SDL2.lib"
+    "${SDL2_LIB_DIR}/SDL2main.lib"
+)
+target_include_directories(openciv4 PRIVATE "${SDL2_INCLUDE_DIR}")
+target_link_options(openciv4 PRIVATE /MAP /SUBSYSTEM:CONSOLE)
 
 # main.cpp includes CvGameCoreDLL.h which needs these defines
 target_compile_definitions(openciv4 PRIVATE
     OPENCIV4
     _SILENCE_STDEXT_HASH_DEPRECATION_WARNINGS
     Py_BUILD_CORE       # Prevent Python.h from auto-linking python24.lib
+    SDL_MAIN_HANDLED    # We define our own main(), not SDL_main
 )
 # Python 2.4 headers needed transitively by CvDLLPythonIFaceBase.h
 target_include_directories(openciv4 SYSTEM PRIVATE
@@ -61,3 +71,10 @@ target_include_directories(openciv4 SYSTEM PRIVATE
 if(MSVC)
     target_compile_options(openciv4 PRIVATE /W0 /Zc:forScope-)
 endif()
+
+# Copy SDL2.dll next to the executable
+add_custom_command(TARGET openciv4 POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${SDL2_LIB_DIR}/SDL2.dll"
+        $<TARGET_FILE_DIR:openciv4>
+)

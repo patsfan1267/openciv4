@@ -13,7 +13,13 @@
 #include <cstdint>
 #include <csignal>
 #include <cstdlib>
+#include <cstring>
+#include <thread>
+#include <mutex>
+#include <atomic>
 #include <windows.h>
+
+#include <SDL.h>
 
 // Crash handler to print which turn/phase we were in when crashing
 static volatile int g_crashTurn = -1;
@@ -68,6 +74,15 @@ static LONG WINAPI vehHandler(EXCEPTION_POINTERS* pExInfo) {
 // Our stub implementations of all 13 interface classes
 #include "StubInterfaces.h"
 
+// Phase 1: Map viewer
+#include "MapSnapshot.h"
+#include "Renderer.h"
+
+// Global map snapshot shared between game thread and render thread
+static MapSnapshot g_mapSnapshot;
+static std::atomic<bool> g_gameRunning{true};
+static std::atomic<bool> g_gameThreadDone{false};
+
 // ---- Helper: find valid civ/leader pairs from loaded XML data ----
 struct CivLeaderPair {
     CivilizationTypes eCiv;
@@ -100,6 +115,178 @@ static int findCivLeaderPairs(CivLeaderPair* pairs, int maxPairs)
         }
     }
     return count;
+}
+
+// ---- Populate MapSnapshot from game state ----
+static void updateMapSnapshot()
+{
+    CvMap& map = GC.getMapINLINE();
+    int w = map.getGridWidth();
+    int h = map.getGridHeight();
+
+    // Build a local copy first, then swap under lock
+    std::vector<PlotData> newPlots(w * h);
+    for (int i = 0; i < w * h; i++) {
+        CvPlot* pPlot = map.plotByIndexINLINE(i);
+        PlotData& pd = newPlots[i];
+
+        pd.terrainType = (int)pPlot->getTerrainType();
+        pd.plotType = (int)pPlot->getPlotType();
+        pd.featureType = (int)pPlot->getFeatureType();
+        pd.ownerID = (int)pPlot->getOwnerINLINE();
+        pd.isRiver = pPlot->isRiver();
+        pd.isCity = pPlot->isCity();
+        pd.unitCount = pPlot->getNumUnits();
+
+        // Get owner's primary color
+        pd.ownerColorR = pd.ownerColorG = pd.ownerColorB = 255; // default white
+        if (pd.ownerID >= 0 && pd.ownerID < MAX_PLAYERS) {
+            CvPlayer& kOwner = GET_PLAYER((PlayerTypes)pd.ownerID);
+            PlayerColorTypes eColor = kOwner.getPlayerColor();
+            if (eColor >= 0 && eColor < GC.getNumPlayerColorInfos()) {
+                CvPlayerColorInfo& colorInfo = GC.getPlayerColorInfo(eColor);
+                ColorTypes ePrimary = (ColorTypes)colorInfo.getColorTypePrimary();
+                if (ePrimary >= 0 && ePrimary < GC.getNumColorInfos()) {
+                    const NiColorA& c = GC.getColorInfo(ePrimary).getColor();
+                    pd.ownerColorR = (uint8_t)(c.r * 255.0f);
+                    pd.ownerColorG = (uint8_t)(c.g * 255.0f);
+                    pd.ownerColorB = (uint8_t)(c.b * 255.0f);
+                }
+            }
+        }
+
+        // City name
+        if (pd.isCity) {
+            CvCity* pCity = pPlot->getPlotCity();
+            if (pCity) {
+                const wchar_t* wName = pCity->getName().GetCString();
+                // Convert wchar_t to char (ASCII subset)
+                if (wName) {
+                    std::string name;
+                    for (int c = 0; wName[c] && c < 64; c++)
+                        name += (char)(wName[c] < 128 ? wName[c] : '?');
+                    pd.cityName = name;
+                }
+            }
+        }
+    }
+
+    // Swap into the shared snapshot under lock
+    {
+        std::lock_guard<std::mutex> lock(g_mapSnapshot.mtx);
+        g_mapSnapshot.width = w;
+        g_mapSnapshot.height = h;
+        g_mapSnapshot.gameTurn = GC.getGameINLINE().getGameTurn();
+        g_mapSnapshot.gameYear = GC.getGameINLINE().getGameTurnYear();
+        g_mapSnapshot.wrapX = map.isWrapX();
+        g_mapSnapshot.wrapY = map.isWrapY();
+        g_mapSnapshot.plots = std::move(newPlots);
+    }
+}
+
+// ---- Game thread function ----
+static void gameThreadFunc()
+{
+    const int MAX_TURNS = 300;
+    fprintf(stderr, "=== Starting headless game loop (max %d turns) ===\n", MAX_TURNS);
+
+    // Take initial snapshot before any turns
+    updateMapSnapshot();
+
+    for (int iTurn = 0; iTurn < MAX_TURNS && g_gameRunning; iTurn++)
+    {
+        // Process each alive player's full turn
+        for (int p = 0; p < MAX_PLAYERS && g_gameRunning; p++)
+        {
+            CvPlayerAI& kPlayer = GET_PLAYER((PlayerTypes)p);
+            if (kPlayer.isAlive())
+            {
+                GC.getGameINLINE().setActivePlayer((PlayerTypes)p);
+                ((CvPlayerAI&)kPlayer).AI_updateFoundValues();
+
+                g_crashTurn = iTurn; g_crashPlayer = p;
+                g_crashPhase = 0;
+                kPlayer.doTurn();
+
+                // Force research if AI didn't pick one
+                if (kPlayer.getCurrentResearch() == NO_TECH && kPlayer.isResearch()
+                    && !kPlayer.isBarbarian())
+                {
+                    for (int t = 0; t < GC.getNumTechInfos(); t++)
+                    {
+                        if (kPlayer.canResearch((TechTypes)t))
+                        {
+                            kPlayer.pushResearch((TechTypes)t, true);
+                            break;
+                        }
+                    }
+                }
+
+                g_crashPhase = 1;
+                kPlayer.doTurnUnits();
+                g_crashPhase = 2;
+                kPlayer.AI_unitUpdate();
+            }
+        }
+        GC.getGameINLINE().setActivePlayer((PlayerTypes)0);
+
+        g_crashPhase = 3;
+        GC.getGameINLINE().doTurn();
+
+        // Update map snapshot for the renderer
+        updateMapSnapshot();
+
+        // Progress report every 50 turns
+        if (iTurn % 50 == 0)
+        {
+            fprintf(stderr, "--- Turn %d ---\n", iTurn);
+            for (int p = 0; p < MAX_CIV_PLAYERS; p++)
+            {
+                CvPlayer& kPlayer = GET_PLAYER((PlayerTypes)p);
+                if (kPlayer.isAlive())
+                {
+                    int numTechs = 0;
+                    for (int tt = 0; tt < GC.getNumTechInfos(); tt++)
+                        if (GET_TEAM(kPlayer.getTeam()).isHasTech((TechTypes)tt)) numTechs++;
+                    fprintf(stderr, "  P%d: cities=%d units=%d pop=%d techs=%d score=%d\n", p,
+                            kPlayer.getNumCities(), kPlayer.getNumUnits(),
+                            kPlayer.getTotalPopulation(), numTechs,
+                            GC.getGameINLINE().getPlayerScore((PlayerTypes)p));
+                }
+            }
+        }
+
+        if (GC.getGameINLINE().getGameState() == GAMESTATE_OVER)
+        {
+            fprintf(stderr, "[game] Game over at turn %d!\n",
+                    GC.getGameINLINE().getGameTurn());
+            break;
+        }
+    }
+
+    fprintf(stderr, "\n=== Game loop finished ===\n");
+    fprintf(stderr, "Final game turn: %d\n", GC.getGameINLINE().getGameTurn());
+
+    // Print final stats
+    for (int i = 0; i < MAX_PLAYERS; i++)
+    {
+        CvPlayer& kPlayer = GET_PLAYER((PlayerTypes)i);
+        if (kPlayer.isAlive())
+        {
+            int numTechs = 0;
+            CvTeam& kTeam = GET_TEAM(kPlayer.getTeam());
+            for (int t = 0; t < GC.getNumTechInfos(); t++)
+                if (kTeam.isHasTech((TechTypes)t)) numTechs++;
+            const char* civType = GC.getCivilizationInfo(kPlayer.getCivilizationType()).getType();
+            fprintf(stderr, "  Player %d (%s): cities=%d units=%d pop=%d techs=%d score=%d\n",
+                    i, civType ? civType : "???",
+                    kPlayer.getNumCities(), kPlayer.getNumUnits(),
+                    kPlayer.getTotalPopulation(), numTechs,
+                    GC.getGameINLINE().getPlayerScore((PlayerTypes)i));
+        }
+    }
+
+    g_gameThreadDone = true;
 }
 
 int main(int argc, char* argv[])
@@ -404,156 +591,116 @@ int main(int argc, char* argv[])
         }
     }
 
-    // ---- Step 7: Run headless game loop ----
-    // Simulates the BTS sequential turn flow:
-    //   For each player in order:
-    //     1. doTurnUnits()    — refreshes AI found values, resets unit movement points
-    //     2. AI_unitUpdate()  — units execute AI (move, settle, attack)
-    //     3. doTurn()         — cities process production, AI chooses next build
-    //   Then CvGame::doTurn() advances the global game state.
-    //
-    // This matches the real BTS flow in setTurnActive(true)/setTurnActive(false):
-    //   setTurnActive(true)  → doTurnUnits()  (line 9818 in CvPlayer.cpp)
-    //   updateMoves()        → AI_unitUpdate()
-    //   setTurnActive(false) → doTurn()       (line 9880 in CvPlayer.cpp)
-    const int MAX_TURNS = 300;
-    fprintf(stderr, "=== Starting headless game loop (max %d turns) ===\n", MAX_TURNS);
-
-    for (int iTurn = 0; iTurn < MAX_TURNS; iTurn++)
-    {
-        // Process each alive player's full turn (BTS sequential order)
-        for (int p = 0; p < MAX_PLAYERS; p++)
-        {
-            CvPlayerAI& kPlayer = GET_PLAYER((PlayerTypes)p);
-            if (kPlayer.isAlive())
-            {
-                GC.getGameINLINE().setActivePlayer((PlayerTypes)p);
-
-                // Refresh AI found values before production decisions so the AI
-                // knows about valid city sites (needed for settler training).
-                ((CvPlayerAI&)kPlayer).AI_updateFoundValues();
-
-                g_crashTurn = iTurn; g_crashPlayer = p;
-                g_crashPhase = 0;
-                kPlayer.doTurn();
-
-                // OpenCiv4 fallback: if the AI failed to pick research, force it
-                if (kPlayer.getCurrentResearch() == NO_TECH && kPlayer.isResearch()
-                    && !kPlayer.isBarbarian())
-                {
-                    for (int t = 0; t < GC.getNumTechInfos(); t++)
-                    {
-                        if (kPlayer.canResearch((TechTypes)t))
-                        {
-                            kPlayer.pushResearch((TechTypes)t, true);
-                            if (iTurn < 5 || iTurn % 50 == 0)
-                                fprintf(stderr, "  [FORCE-RES] P%d forced tech %d at turn %d\n", p, t, iTurn);
-                            break;
-                        }
-                    }
-                }
-
-                g_crashPhase = 1;
-                kPlayer.doTurnUnits();
-                g_crashPhase = 2;
-                kPlayer.AI_unitUpdate();
-            }
-        }
-        GC.getGameINLINE().setActivePlayer((PlayerTypes)0);
-
-        // Advance the game turn (team turns, map turn, barbarians, etc.)
-        g_crashPhase = 3;
-        GC.getGameINLINE().doTurn();
-
-        // Progress report every 50 turns
-        if (iTurn % 50 == 0)
-        {
-            fprintf(stderr, "--- Turn %d ---\n", iTurn);
-            for (int p = 0; p < MAX_CIV_PLAYERS; p++)
-            {
-                CvPlayer& kPlayer = GET_PLAYER((PlayerTypes)p);
-                if (kPlayer.isAlive())
-                {
-                    int numWars = GET_TEAM(kPlayer.getTeam()).getAtWarCount(true);
-                    int numTechs = 0;
-                    for (int tt = 0; tt < GC.getNumTechInfos(); tt++)
-                        if (GET_TEAM(kPlayer.getTeam()).isHasTech((TechTypes)tt)) numTechs++;
-                    fprintf(stderr, "  P%d: cities=%d units=%d pop=%d techs=%d score=%d wars=%d\n", p,
-                            kPlayer.getNumCities(), kPlayer.getNumUnits(),
-                            kPlayer.getTotalPopulation(), numTechs,
-                            GC.getGameINLINE().getPlayerScore((PlayerTypes)p),
-                            numWars);
-                }
-            }
-            // War AI diagnostics
-            for (int t = 0; t < MAX_CIV_TEAMS; t++)
-            {
-                CvTeamAI& kTeam = GET_TEAM((TeamTypes)t);
-                if (!kTeam.isAlive() || kTeam.isBarbarian() || kTeam.isMinorCiv())
-                    continue;
-                int warPlanCount = kTeam.getAnyWarPlanCount(true);
-                int hasMet = kTeam.getHasMetCivCount(true);
-                int power = kTeam.getPower(true);
-                // Check per-player AI strategies
-                int betterUnits = 0, finTrouble = 0, dagger = 0;
-                for (int p2 = 0; p2 < MAX_PLAYERS; p2++)
-                {
-                    CvPlayerAI& kP = GET_PLAYER((PlayerTypes)p2);
-                    if (kP.isAlive() && kP.getTeam() == (TeamTypes)t)
-                    {
-                        if (kP.AI_isDoStrategy(AI_STRATEGY_GET_BETTER_UNITS)) betterUnits++;
-                        if (kP.AI_isFinancialTrouble()) finTrouble++;
-                        if (kP.AI_isDoStrategy(AI_STRATEGY_DAGGER)) dagger++;
-                    }
-                }
-                fprintf(stderr, "  [WAR] Team%d: plans=%d met=%d pow=%d getBetter=%d finTrouble=%d dagger=%d",
-                        t, warPlanCount, hasMet, power, betterUnits, finTrouble, dagger);
-                // Show war plans against each other team
-                for (int t2 = 0; t2 < MAX_CIV_TEAMS; t2++)
-                {
-                    if (t2 == t) continue;
-                    CvTeamAI& kOther = GET_TEAM((TeamTypes)t2);
-                    if (!kOther.isAlive() || kOther.isBarbarian()) continue;
-                    WarPlanTypes ePlan = kTeam.AI_getWarPlan((TeamTypes)t2);
-                    if (ePlan != NO_WARPLAN)
-                        fprintf(stderr, " vs%d=plan%d", t2, (int)ePlan);
-                }
-                fprintf(stderr, "\n");
-            }
-        }
-
-        // Check if game ended
-        if (GC.getGameINLINE().getGameState() == GAMESTATE_OVER)
-        {
-            fprintf(stderr, "[main] Game over at turn %d!\n",
-                    GC.getGameINLINE().getGameTurn());
+    // ---- Step 7: Check for --headless flag ----
+    bool headless = false;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--headless") == 0) {
+            headless = true;
             break;
         }
     }
 
-    fprintf(stderr, "\n=== Headless game loop finished ===\n");
-    fprintf(stderr, "Final game turn: %d\n", GC.getGameINLINE().getGameTurn());
+    if (headless) {
+        // ---- Headless mode: run game loop on main thread (Phase 0 behavior) ----
+        fprintf(stderr, "[main] Running in HEADLESS mode (no window).\n");
+        gameThreadFunc();
+    } else {
+        // ---- Windowed mode: SDL2 window + game on background thread ----
+        fprintf(stderr, "[main] Initializing SDL2...\n");
+        SDL_SetMainReady();
+        if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+            fprintf(stderr, "[main] SDL_Init failed: %s\n", SDL_GetError());
+            fprintf(stderr, "[main] Falling back to headless mode.\n");
+            gameThreadFunc();
+        } else {
+            int winW = 1280, winH = 720;
+            SDL_Window* window = SDL_CreateWindow(
+                "OpenCiv4 — Phase 1 Map Viewer",
+                SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                winW, winH,
+                SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
+            );
+            if (!window) {
+                fprintf(stderr, "[main] SDL_CreateWindow failed: %s\n", SDL_GetError());
+                SDL_Quit();
+                gameThreadFunc();
+            } else {
+                SDL_Renderer* sdlRenderer = SDL_CreateRenderer(
+                    window, -1,
+                    SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC
+                );
+                if (!sdlRenderer) {
+                    fprintf(stderr, "[main] SDL_CreateRenderer failed: %s\n", SDL_GetError());
+                    SDL_DestroyWindow(window);
+                    SDL_Quit();
+                    gameThreadFunc();
+                } else {
+                    fprintf(stderr, "[main] SDL2 window created (%dx%d).\n", winW, winH);
 
-    // Print final stats
-    for (int i = 0; i < MAX_PLAYERS; i++)
-    {
-        CvPlayer& kPlayer = GET_PLAYER((PlayerTypes)i);
-        if (kPlayer.isAlive())
-        {
-            // Count known techs
-            int numTechs = 0;
-            CvTeam& kTeam = GET_TEAM(kPlayer.getTeam());
-            for (int t = 0; t < GC.getNumTechInfos(); t++)
-            {
-                if (kTeam.isHasTech((TechTypes)t))
-                    numTechs++;
+                    // Create renderer
+                    Renderer renderer(sdlRenderer, winW, winH);
+
+                    // Start game on background thread
+                    fprintf(stderr, "[main] Starting game thread...\n");
+                    std::thread gameThread(gameThreadFunc);
+
+                    // ---- Main render loop ----
+                    bool running = true;
+                    while (running) {
+                        SDL_Event event;
+                        while (SDL_PollEvent(&event)) {
+                            switch (event.type) {
+                                case SDL_QUIT:
+                                    running = false;
+                                    break;
+                                case SDL_KEYDOWN:
+                                    if (event.key.keysym.sym == SDLK_ESCAPE)
+                                        running = false;
+                                    else
+                                        renderer.handleKeyDown(event.key.keysym.sym, g_mapSnapshot);
+                                    break;
+                                case SDL_KEYUP:
+                                    renderer.handleKeyUp(event.key.keysym.sym);
+                                    break;
+                                case SDL_MOUSEWHEEL:
+                                    {
+                                        int mx, my;
+                                        SDL_GetMouseState(&mx, &my);
+                                        renderer.handleMouseWheel(event.wheel.y, mx, my);
+                                    }
+                                    break;
+                                case SDL_MOUSEMOTION:
+                                    renderer.handleMouseMotion(
+                                        event.motion.xrel, event.motion.yrel,
+                                        (event.motion.state & (SDL_BUTTON_MMASK | SDL_BUTTON_RMASK)) != 0
+                                    );
+                                    break;
+                                case SDL_WINDOWEVENT:
+                                    if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
+                                        renderer.handleResize(event.window.data1, event.window.data2);
+                                    }
+                                    break;
+                            }
+                        }
+
+                        // Draw the map
+                        renderer.draw(g_mapSnapshot);
+
+                        // If game thread is done and we're still running, keep showing the final state
+                        // User can close window with X or ESC
+                    }
+
+                    // Signal game thread to stop and wait for it
+                    g_gameRunning = false;
+                    if (gameThread.joinable())
+                        gameThread.join();
+
+                    SDL_DestroyRenderer(sdlRenderer);
+                    SDL_DestroyWindow(window);
+                    SDL_Quit();
+                    fprintf(stderr, "[main] SDL2 shutdown complete.\n");
+                }
             }
-            const char* civType = GC.getCivilizationInfo(kPlayer.getCivilizationType()).getType();
-            fprintf(stderr, "  Player %d (%s): cities=%d units=%d pop=%d techs=%d score=%d\n",
-                    i, civType ? civType : "???",
-                    kPlayer.getNumCities(), kPlayer.getNumUnits(),
-                    kPlayer.getTotalPopulation(), numTechs,
-                    GC.getGameINLINE().getPlayerScore((PlayerTypes)i));
         }
     }
 

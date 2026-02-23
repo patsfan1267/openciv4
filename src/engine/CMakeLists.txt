@@ -1,4 +1,4 @@
-# Engine library - our new code (stubs, host logic, XML parser, pathfinding)
+# Engine library - our new code (stubs, host logic, XML parser, pathfinding, renderer)
 add_library(engine STATIC
     stubs/StubUtilityIFace.cpp
     stubs/StubLinkFixes.cpp
@@ -6,6 +6,7 @@ add_library(engine STATIC
     xml/pugixml.cpp
     pathfinding/FAStar.cpp
     pathfinding/RealFAStarIFace.cpp
+    Renderer.cpp
 )
 
 target_include_directories(engine PUBLIC
@@ -17,6 +18,9 @@ target_include_directories(engine PUBLIC
 
 # Engine needs to see gamecore headers (for CvGlobals, interface base classes, etc.)
 target_link_libraries(engine PUBLIC gamecore)
+
+# SDL2 headers for Renderer.cpp
+target_include_directories(engine PRIVATE "${SDL2_INCLUDE_DIR}")
 
 # Python 2.4 headers needed transitively by CvDLLPythonIFaceBase.h
 set(PYTHON24_ROOT "C:/Civ4SDK/beyond-the-sword-sdk-develop/CvGameCoreDLL/Python24")

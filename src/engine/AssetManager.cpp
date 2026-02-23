@@ -67,6 +67,8 @@ AssetManager::~AssetManager() {
         if (pair.second) glDeleteTextures(1, &pair.second);
     for (auto& pair : m_featureBlendGL)
         if (pair.second) glDeleteTextures(1, &pair.second);
+    if (m_oceanWaterGL) glDeleteTextures(1, &m_oceanWaterGL);
+    if (m_coastWaterGL) glDeleteTextures(1, &m_coastWaterGL);
 }
 
 bool AssetManager::openArt0(const char* btsInstallDir) {
@@ -180,7 +182,54 @@ bool AssetManager::initGL(const char* btsInstallDir) {
     fprintf(stderr, "[AssetManager] Loaded %d blend terrain textures, %d blend feature textures\n",
             (int)m_terrainBlendGL.size(), (int)m_featureBlendGL.size());
 
+    generateWaterTextures();
+
     return true;
+}
+
+void AssetManager::generateWaterTextures() {
+    // Create procedural water textures for ocean and coast tile fill.
+    // The *BLEND.dds textures are designed for edge transitions, not tile fill.
+    const int W = 256, H = 256;
+    std::vector<uint8_t> pixels(W * H * 4);
+
+    // Ocean: deep dark blue with subtle wave pattern
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            float fx = x / (float)W, fy = y / (float)H;
+            // Overlapping sine waves for organic pattern
+            float w1 = sinf(fx * 14.0f + fy * 10.0f) * 0.5f + 0.5f;
+            float w2 = sinf(fx * 9.0f - fy * 13.0f + 1.7f) * 0.5f + 0.5f;
+            float w3 = sinf(fx * 22.0f + fy * 5.0f + 3.1f) * 0.5f + 0.5f;
+            float wave = (w1 * 0.4f + w2 * 0.35f + w3 * 0.25f);
+            int idx = (y * W + x) * 4;
+            pixels[idx+0] = (uint8_t)(12 + wave * 25);   // R
+            pixels[idx+1] = (uint8_t)(35 + wave * 45);   // G
+            pixels[idx+2] = (uint8_t)(85 + wave * 70);   // B
+            pixels[idx+3] = 255;
+        }
+    }
+    m_oceanWaterGL = createGLTextureFromRGBA(pixels.data(), W, H);
+
+    // Coast: lighter teal/turquoise with more visible wave pattern
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            float fx = x / (float)W, fy = y / (float)H;
+            float w1 = sinf(fx * 16.0f + fy * 8.0f + 0.5f) * 0.5f + 0.5f;
+            float w2 = sinf(fx * 7.0f - fy * 15.0f + 2.3f) * 0.5f + 0.5f;
+            float w3 = sinf(fx * 20.0f + fy * 6.0f + 4.0f) * 0.5f + 0.5f;
+            float wave = (w1 * 0.4f + w2 * 0.35f + w3 * 0.25f);
+            int idx = (y * W + x) * 4;
+            pixels[idx+0] = (uint8_t)(25 + wave * 35);   // R
+            pixels[idx+1] = (uint8_t)(75 + wave * 60);   // G
+            pixels[idx+2] = (uint8_t)(120 + wave * 65);  // B
+            pixels[idx+3] = 255;
+        }
+    }
+    m_coastWaterGL = createGLTextureFromRGBA(pixels.data(), W, H);
+
+    fprintf(stderr, "[AssetManager] Generated procedural water textures (ocean=%u, coast=%u)\n",
+            m_oceanWaterGL, m_coastWaterGL);
 }
 
 GLuint AssetManager::getTerrainTextureGL(int terrainType) const {
@@ -209,7 +258,8 @@ GLuint AssetManager::createGLTextureFromRGBA(const uint8_t* pixels, int w, int h
     glBindTexture(GL_TEXTURE_2D, tex);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
@@ -313,7 +363,6 @@ Mesh* AssetManager::getModel(const std::string& nifPath) {
             nifData = m_art0.readFile("art/" + key);
         }
         if (nifData.empty()) {
-            fprintf(stderr, "[AssetManager] NIF not found in FPK: %s\n", key.c_str());
             m_modelCache[key] = nullptr;
             return nullptr;
         }
@@ -431,9 +480,6 @@ Mesh* AssetManager::getModel(const std::string& nifPath) {
         m_modelCache[key] = nullptr;
         return nullptr;
     }
-
-    fprintf(stderr, "[AssetManager] Loaded 3D model: %s (%d submeshes)\n",
-            key.c_str(), mesh->submeshCount());
 
     Mesh* ptr = mesh.get();
     m_modelCache[key] = std::move(mesh);

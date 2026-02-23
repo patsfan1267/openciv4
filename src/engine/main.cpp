@@ -28,11 +28,24 @@ static volatile int g_crashTurn = -1;
 static volatile int g_crashPlayer = -1;
 static volatile int g_crashPhase = -1; // 0=update,1=drainCmd,2=snapshot
 volatile int g_crashSubPhase = -1;
+extern volatile int g_renderStep; // render thread step (defined in GLRenderer.cpp)
+
+// Write crash info to both console and a log file
+static void writeCrashInfo(const char* msg) {
+    // Print to stdout (console)
+    printf("%s", msg);
+    fflush(stdout);
+    // Append to crash log file
+    FILE* f = fopen("openciv4_crash.log", "a");
+    if (f) { fprintf(f, "%s", msg); fclose(f); }
+}
 
 static void crashHandler(int sig) {
-    fprintf(stderr, "\n!!! CRASH (signal %d) at turn=%d player=%d phase=%d sub=%d !!!\n",
-            sig, g_crashTurn, g_crashPlayer, g_crashPhase, g_crashSubPhase);
-    fflush(stderr);
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+        "\n!!! CRASH (signal %d) turn=%d player=%d phase=%d sub=%d renderStep=%d !!!\n",
+        sig, g_crashTurn, g_crashPlayer, g_crashPhase, g_crashSubPhase, g_renderStep);
+    writeCrashInfo(buf);
     _exit(139);
 }
 
@@ -42,15 +55,30 @@ static LONG WINAPI vehHandler(EXCEPTION_POINTERS* pExInfo) {
         ULONG_PTR readWrite = pExInfo->ExceptionRecord->ExceptionInformation[0];
         ULONG_PTR faultAddr = pExInfo->ExceptionRecord->ExceptionInformation[1];
         ULONG_PTR instrAddr = (ULONG_PTR)pExInfo->ExceptionRecord->ExceptionAddress;
-        fprintf(stderr, "\n!!! ACCESS VIOLATION: %s at address 0x%llX (instruction at 0x%llX)\n",
-                readWrite == 0 ? "READ" : "WRITE",
-                (unsigned long long)faultAddr, (unsigned long long)instrAddr);
-        fprintf(stderr, "    turn=%d player=%d phase=%d sub=%d\n",
-                g_crashTurn, g_crashPlayer, g_crashPhase, g_crashSubPhase);
         CONTEXT* ctx = pExInfo->ContextRecord;
-        fprintf(stderr, "    RIP=0x%llX RSP=0x%llX RBP=0x%llX\n",
-                (unsigned long long)ctx->Rip, (unsigned long long)ctx->Rsp, (unsigned long long)ctx->Rbp);
-        fflush(stderr);
+
+        // Get module base for RVA calculation
+        HMODULE hMod = NULL;
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)instrAddr, &hMod);
+        ULONG_PTR moduleBase = (ULONG_PTR)hMod;
+        ULONG_PTR rva = instrAddr - moduleBase;
+
+        char buf[1024];
+        snprintf(buf, sizeof(buf),
+            "\n============= CRASH REPORT =============\n"
+            "ACCESS VIOLATION: %s at address 0x%llX\n"
+            "Instruction: 0x%llX (RVA: 0x%llX, base: 0x%llX)\n"
+            "Turn=%d Player=%d Phase=%d Sub=%d RenderStep=%d\n"
+            "RIP=0x%llX RSP=0x%llX RBP=0x%llX\n"
+            "=========================================\n",
+            readWrite == 0 ? "READ" : "WRITE",
+            (unsigned long long)faultAddr,
+            (unsigned long long)instrAddr, (unsigned long long)rva, (unsigned long long)moduleBase,
+            g_crashTurn, g_crashPlayer, g_crashPhase, g_crashSubPhase, g_renderStep,
+            (unsigned long long)ctx->Rip, (unsigned long long)ctx->Rsp, (unsigned long long)ctx->Rbp);
+        writeCrashInfo(buf);
+
         _exit(139);
     }
     return EXCEPTION_CONTINUE_SEARCH;
@@ -161,10 +189,12 @@ static std::string wcharToStr(const wchar_t* w, int maxLen = 64) {
 // ---- Populate MapSnapshot from game state ----
 static void updateMapSnapshot()
 {
+    g_crashSubPhase = 0;
     CvMap& map = GC.getMapINLINE();
     int w = map.getGridWidth();
     int h = map.getGridHeight();
 
+    g_crashSubPhase = 1;
     std::vector<PlotData> newPlots(w * h);
     for (int i = 0; i < w * h; i++) {
         CvPlot* pPlot = map.plotByIndexINLINE(i);
@@ -295,6 +325,7 @@ static void updateMapSnapshot()
     }
 
     // Collect player info
+    g_crashSubPhase = 2;
     PlayerInfo playerInfos[18];
     int numPlayers = 0;
     for (int p = 0; p < MAX_CIV_PLAYERS; p++) {
@@ -430,6 +461,7 @@ static void updateMapSnapshot()
     }
 
     // Swap into shared snapshot
+    g_crashSubPhase = 3;
     {
         std::lock_guard<std::mutex> lock(g_mapSnapshot.mtx);
         g_mapSnapshot.width = w;
@@ -722,10 +754,14 @@ static void autoAssignResearch()
 // ---- Game thread function (Phase 2: uses CvGame::update()) ----
 static void gameThreadFunc()
 {
+    try {
     fprintf(stderr, "=== Starting game loop (CvGame::update mode) ===\n");
+    printf("[Game] Thread started. Taking initial snapshot...\n"); fflush(stdout);
 
     // Take initial snapshot before game starts
     updateMapSnapshot();
+    printf("[Game] Snapshot ready (map %dx%d). Starting game loop...\n",
+           g_mapSnapshot.width, g_mapSnapshot.height); fflush(stdout);
 
     int lastTurn = -1;
 
@@ -744,7 +780,13 @@ static void gameThreadFunc()
         // Call the real BTS game update loop
         g_crashPhase = 0;
         g_crashTurn = GC.getGameINLINE().getGameTurn();
+        if (lastTurn == -1) {
+            printf("[Game] Calling first CvGame::update()...\n"); fflush(stdout);
+        }
         GC.getGameINLINE().update();
+        if (lastTurn == -1) {
+            printf("[Game] First update() returned. Turn=%d\n", GC.getGameINLINE().getGameTurn()); fflush(stdout);
+        }
 
         // Post-update: auto-management for human player
         CvPlayer& human = GET_PLAYER((PlayerTypes)HUMAN_PLAYER);
@@ -808,6 +850,17 @@ static void gameThreadFunc()
     }
 
     g_gameThreadDone = true;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "\n!!! EXCEPTION in game thread: %s\n", e.what());
+        fflush(stderr);
+        g_gameRunning = false;
+        g_gameThreadDone = true;
+    } catch (...) {
+        fprintf(stderr, "\n!!! UNKNOWN EXCEPTION in game thread\n");
+        fflush(stderr);
+        g_gameRunning = false;
+        g_gameThreadDone = true;
+    }
 }
 
 // ---- Headless game loop (Phase 0 behavior, for --headless mode) ----
@@ -867,6 +920,14 @@ static void headlessGameThreadFunc()
 
 int main(int argc, char* argv[])
 {
+    // Redirect stderr to a log file so crash info persists even if console closes
+    FILE* logFile = fopen("openciv4.log", "w");
+    if (logFile) {
+        // Duplicate to both console and file: redirect stderr to file,
+        // and use printf for console output of key messages
+        freopen("openciv4.log", "w", stderr);
+    }
+
     AddVectoredExceptionHandler(1, vehHandler);
     signal(SIGSEGV, crashHandler);
     signal(SIGABRT, crashHandler);
@@ -876,13 +937,17 @@ int main(int argc, char* argv[])
     fprintf(stderr, "Phase 2: Playable Game\n");
     fprintf(stderr, "Build: 64-bit (%zu-byte pointers)\n\n", sizeof(void*));
     fprintf(stderr, "BTS Install: %s\n\n", BTS_INSTALL_DIR);
+    printf("=== OpenCiv4 Engine ===\n");
+    fflush(stdout);
 
     // ---- Check flags ----
     bool headless = false;
     bool legacyRenderer = false;
+    bool no3D = false;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--headless") == 0) headless = true;
         if (strcmp(argv[i], "--legacy-2d") == 0) legacyRenderer = true;
+        if (strcmp(argv[i], "--no-3d") == 0) no3D = true;
         if (strcmp(argv[i], "--test-fpk") == 0) {
             std::string fpkPath = std::string(BTS_INSTALL_DIR) + "/../Assets/Art0.FPK";
             FPKArchive fpk;
@@ -1056,30 +1121,40 @@ int main(int argc, char* argv[])
     fprintf(stderr, "\n");
 
     // ---- Step 4: Load XML data ----
+    printf("Loading game data (this takes 30-60 seconds)...\n"); fflush(stdout);
     fprintf(stderr, "[main] Loading XML data...\n");
     {
         CvXMLLoadUtility xml;
+        printf("  [1/9] Global defines...\n"); fflush(stdout);
         fprintf(stderr, "[main]   SetGlobalDefines...\n");
         xml.SetGlobalDefines();
+        printf("  [2/9] Global types...\n"); fflush(stdout);
         fprintf(stderr, "[main]   SetGlobalTypes...\n");
         xml.SetGlobalTypes();
+        printf("  [3/9] Basic infos...\n"); fflush(stdout);
         fprintf(stderr, "[main]   LoadBasicInfos...\n");
         xml.LoadBasicInfos();
+        printf("  [4/9] Art definitions...\n"); fflush(stdout);
         fprintf(stderr, "[main]   ARTFILEMGR.Init()...\n");
         ARTFILEMGR.Init();
         fprintf(stderr, "[main]   SetGlobalArtDefines...\n");
         xml.SetGlobalArtDefines();
         fprintf(stderr, "[main]   buildArtFileInfoMaps...\n");
         ARTFILEMGR.buildArtFileInfoMaps();
+        printf("  [5/9] Game data (units, buildings, techs)...\n"); fflush(stdout);
         fprintf(stderr, "[main]   LoadPreMenuGlobals...\n");
         xml.LoadPreMenuGlobals();
+        printf("  [6/9] Post-globals...\n"); fflush(stdout);
         fprintf(stderr, "[main]   SetPostGlobalsGlobalDefines...\n");
         xml.SetPostGlobalsGlobalDefines();
+        printf("  [7/9] Advanced game data...\n"); fflush(stdout);
         fprintf(stderr, "[main]   LoadPostMenuGlobals...\n");
         xml.LoadPostMenuGlobals();
+        printf("  [8/9] Text translations...\n"); fflush(stdout);
         fprintf(stderr, "[main]   LoadGlobalText...\n");
         xml.LoadGlobalText();
     }
+    printf("  [9/9] XML complete! (%zu text entries)\n", stubDLL.m_textMap.size()); fflush(stdout);
     fprintf(stderr, "[main] XML loading complete. Text entries: %zu\n\n",
             stubDLL.m_textMap.size());
 
@@ -1165,6 +1240,7 @@ int main(int argc, char* argv[])
     GC.getGameINLINE().init(eHandicap);
     fprintf(stderr, "[main] CvGame::init() complete.\n");
 
+    printf("Generating map...\n"); fflush(stdout);
     fprintf(stderr, "[main] Initializing map...\n");
     GC.getMapINLINE().init();
     fprintf(stderr, "[main] CvMap::init() complete. Grid: %dx%d\n",
@@ -1173,11 +1249,13 @@ int main(int argc, char* argv[])
     fprintf(stderr, "[main] Generating random map...\n");
     CvMapGenerator::GetInstance().generateRandomMap();
     CvMapGenerator::GetInstance().addGameElements();
+    printf("Map generated (%dx%d).\n", GC.getMapINLINE().getGridWidth(), GC.getMapINLINE().getGridHeight()); fflush(stdout);
 
     fprintf(stderr, "[main] Updating plot yields...\n");
     GC.getMapINLINE().updateYield();
 
     // Initialize teams and players
+    printf("Setting up players and AI...\n"); fflush(stdout);
     fprintf(stderr, "[main] Initializing teams and players...\n");
     for (int i = 0; i < MAX_TEAMS; i++) {
         if (GC.getInitCore().getSlotStatus((PlayerTypes)i) == SS_COMPUTER ||
@@ -1242,11 +1320,13 @@ int main(int argc, char* argv[])
     }
 
     // ---- Step 7: Run the game ----
+    printf("Game initialization complete!\n"); fflush(stdout);
     if (headless) {
         fprintf(stderr, "[main] Running in HEADLESS mode.\n");
         headlessGameThreadFunc();
     } else {
         fprintf(stderr, "[main] Initializing SDL2...\n");
+        printf("XML loaded. Initializing graphics...\n"); fflush(stdout);
         SDL_SetMainReady();
         if (SDL_Init(SDL_INIT_VIDEO) != 0) {
             fprintf(stderr, "[main] SDL_Init failed: %s\n", SDL_GetError());
@@ -1315,8 +1395,10 @@ int main(int argc, char* argv[])
                             renderer.init(winW, winH, &assetMgr);
                             renderer.initFonts(fontPath.c_str());
                             renderer.setCommandCallback(pushCommand);
-
-                            fprintf(stderr, "[main] Starting game thread...\n");
+                            if (no3D) {
+                                renderer.setDisable3D(true);
+                            }
+                            printf("Game window open! Starting game...\n"); fflush(stdout);
                             std::thread gameThread(gameThreadFunc);
 
                             bool running = true;

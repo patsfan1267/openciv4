@@ -9,6 +9,18 @@
 #include <algorithm>
 #include <cmath>
 
+// Render step tracking for crash diagnostics
+// 0=idle, 1=terrain, 2=3dModels, 3=HUD, 4=turnBanner, 5=messages, 6=cityPanel,
+// 7=unitPanel, 8=actionBar, 9=playerPanel, 10=minimap, 11=techPicker, 12=tooltip, 13=helpOverlay
+volatile int g_renderStep = 0;
+
+// Font pointer validation helper
+static bool isFontValid(TTF_Font* font) {
+    if (!font) return false;
+    uintptr_t addr = (uintptr_t)font;
+    return (addr >= 0x10000 && addr <= 0x00007FFFFFFFFFFF);
+}
+
 // ---- GLSL shader sources (embedded) ----
 
 static const char* VERT_SRC = R"(
@@ -110,6 +122,38 @@ void main() {
 
 // ---- Lifecycle ----
 
+GLRenderer::GLRenderer()
+    : m_assets(nullptr)
+    , m_windowW(0), m_windowH(0)
+    , m_camera()
+    , m_pushCommand()
+    , m_keyUp(false), m_keyDown(false), m_keyLeft(false), m_keyRight(false)
+    , m_panSpeed(400.0f)
+    , m_lastFrameTime(0)
+    , m_showMinimap(true)
+    , m_showHelp(false)
+    , m_showPlayerPanel(true)
+    , m_showGrid(false)
+    , m_showTechPicker(false)
+    , m_disable3D(false)
+    , m_techScrollOffset(0)
+    , m_mouseX(0), m_mouseY(0)
+    , m_cameraInitialized(false)
+    , m_mmX(0), m_mmY(0), m_mmW(0), m_mmH(0)
+    , m_prodScrollOffset(0)
+    , m_shader()
+    , m_shader3D()
+    , m_batchVAO(0), m_batchVBO(0)
+    , m_batchVerts()
+    , m_whiteTexture(0)
+    , m_fontSmall(nullptr)
+    , m_fontMedium(nullptr)
+    , m_fontLarge(nullptr)
+    , m_textCache()
+    , m_textCacheFrame(0)
+{
+}
+
 GLRenderer::~GLRenderer() {
     shutdown();
 }
@@ -119,13 +163,6 @@ bool GLRenderer::init(int windowW, int windowH, AssetManager* assets) {
     m_windowH = windowH;
     m_assets = assets;
 
-    const char* vendor = (const char*)glGetString(GL_VENDOR);
-    const char* renderer = (const char*)glGetString(GL_RENDERER);
-    const char* version = (const char*)glGetString(GL_VERSION);
-    fprintf(stderr, "[GLRenderer] GL Vendor: %s\n", vendor ? vendor : "?");
-    fprintf(stderr, "[GLRenderer] GL Renderer: %s\n", renderer ? renderer : "?");
-    fprintf(stderr, "[GLRenderer] GL Version: %s\n", version ? version : "?");
-
     initShaders();
     initBatchBuffers();
     initWhiteTexture();
@@ -134,7 +171,6 @@ bool GLRenderer::init(int windowW, int windowH, AssetManager* assets) {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDisable(GL_DEPTH_TEST);
 
-    fprintf(stderr, "[GLRenderer] Initialized (%dx%d)\n", windowW, windowH);
     return true;
 }
 
@@ -282,7 +318,8 @@ bool GLRenderer::initFonts(const char* fontPath) {
 
 GLuint GLRenderer::getTextTexture(const std::string& text, TTF_Font* font,
                                    uint8_t r, uint8_t g, uint8_t b, int& tw, int& th) {
-    // Build cache key from text + font size + color
+    if (!isFontValid(font)) { tw = th = 0; return 0; }
+
     char key[512];
     int fontSize = TTF_FontHeight(font);
     snprintf(key, sizeof(key), "%s|%d|%d%d%d", text.c_str(), fontSize, r, g, b);
@@ -299,7 +336,6 @@ GLuint GLRenderer::getTextTexture(const std::string& text, TTF_Font* font,
     SDL_Surface* surface = TTF_RenderText_Blended(font, text.c_str(), color);
     if (!surface) { tw = th = 0; return 0; }
 
-    // Convert to RGBA if needed
     SDL_Surface* rgba = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGBA32, 0);
     SDL_FreeSurface(surface);
     if (!rgba) { tw = th = 0; return 0; }
@@ -330,7 +366,7 @@ void GLRenderer::drawText(const std::string& text, int x, int y, TTF_Font* font,
     GLuint tex = getTextTexture(text, font, r, g, b, tw, th);
     if (!tex) return;
 
-    flushBatch(); // flush any pending colored quads
+    flushBatch();
     glBindTexture(GL_TEXTURE_2D, tex);
     m_shader.setInt("uUseTexture", 1);
 
@@ -338,14 +374,13 @@ void GLRenderer::drawText(const std::string& text, int x, int y, TTF_Font* font,
     pushQuad((float)x, (float)y, (float)tw, (float)th, 1, 1, 1, 1, tex);
     flushBatch();
 
-    // Restore non-textured mode
     glBindTexture(GL_TEXTURE_2D, m_whiteTexture);
     m_shader.setInt("uUseTexture", 0);
 }
 
 void GLRenderer::drawTextCentered(const std::string& text, int cx, int cy, TTF_Font* font,
                                    uint8_t r, uint8_t g, uint8_t b) {
-    if (!font || text.empty()) return;
+    if (!isFontValid(font) || text.empty()) return;
     int tw = 0, th = 0;
     TTF_SizeText(font, text.c_str(), &tw, &th);
     drawText(text, cx - tw / 2, cy - th / 2, font, r, g, b);
@@ -442,7 +477,6 @@ void GLRenderer::draw(MapSnapshot& snapshot) {
     m_shader.use();
     setProjectionOrtho();
 
-    // Bind white texture by default (for colored quads)
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, m_whiteTexture);
     m_shader.setInt("uTexture", 0);
@@ -451,8 +485,14 @@ void GLRenderer::draw(MapSnapshot& snapshot) {
     {
         std::lock_guard<std::mutex> lock(snapshot.mtx);
 
-        if (snapshot.width == 0 || snapshot.height == 0)
+        if (snapshot.width == 0 || snapshot.height == 0) {
+            // No map data yet — draw a "loading" message
+            if (isFontValid(m_fontMedium)) {
+                drawTextCentered("Waiting for game data...", m_windowW / 2, m_windowH / 2,
+                                 m_fontMedium, 200, 200, 200);
+            }
             return;
+        }
 
         if (!m_cameraInitialized) {
             autoFitCamera(snapshot);
@@ -471,8 +511,13 @@ void GLRenderer::draw(MapSnapshot& snapshot) {
             if (m_camera.offsetY < 0) m_camera.offsetY += mapPixelH;
         }
 
+        g_renderStep = 1;
         drawTerrain(snapshot);
-        draw3DModels(snapshot);
+
+        if (!m_disable3D) {
+            g_renderStep = 2;
+            draw3DModels(snapshot);
+        }
 
         // Restore 2D state after 3D rendering
         m_shader.use();
@@ -480,21 +525,35 @@ void GLRenderer::draw(MapSnapshot& snapshot) {
         glDisable(GL_DEPTH_TEST);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, m_whiteTexture);
 
         // UI overlays
+        g_renderStep = 3;
         drawHUD(snapshot);
+        g_renderStep = 4;
         drawTurnBanner(snapshot);
+        g_renderStep = 5;
         drawGameMessages(snapshot);
+        g_renderStep = 6;
         if (snapshot.cityScreenOpen)
             drawCityPanel(snapshot);
-        else if (snapshot.selectedUnitID >= 0)
+        g_renderStep = 7;
+        if (!snapshot.cityScreenOpen && snapshot.selectedUnitID >= 0)
             drawUnitPanel(snapshot);
+        g_renderStep = 8;
         drawActionBar(snapshot);
+        g_renderStep = 9;
         if (m_showPlayerPanel) drawPlayerPanel(snapshot);
+        g_renderStep = 10;
         if (m_showMinimap) drawMinimap(snapshot);
+        g_renderStep = 11;
         if (m_showTechPicker) drawTechPicker(snapshot);
+        g_renderStep = 12;
         drawTooltip(snapshot);
+        g_renderStep = 13;
         if (m_showHelp) drawHelpOverlay();
+        g_renderStep = 0;
     }
 }
 
@@ -773,44 +832,78 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
             // Fog of war brightness: 0.45 for revealed-but-not-visible, 1.0 for visible
             float fogBright = (plot.visibility == 1) ? 0.45f : 1.0f;
 
-            // Water animation: scroll UVs for coast/ocean tiles
             bool isWater = (plot.terrainType == 5 || plot.terrainType == 6); // COAST=5, OCEAN=6
-            float waterTimeOffset = isWater ? (SDL_GetTicks() * 0.00003f) : 0.0f;
 
             if (haveBlend) {
-                // Determine which blend texture to use
-                int blendKey = plot.terrainType;
-                if (plot.plotType == 0) blendKey = -1; // Peak
-                else if (plot.plotType == 1) blendKey = -2; // Hill
-
-                GLuint tex = m_assets->getTerrainBlendGL(blendKey);
-                if (!tex) tex = m_assets->getTerrainBlendGL(plot.terrainType); // fallback for hills
-                if (!tex) { // no blend texture, fall back to flat color
-                    if (curBoundTex != m_whiteTexture) {
-                        flushBatch();
-                        glBindTexture(GL_TEXTURE_2D, m_whiteTexture);
-                        m_shader.setInt("uUseTexture", 0);
-                        curBoundTex = m_whiteTexture;
+                if (isWater) {
+                    // Water tiles: use procedural water texture with scrolling UVs
+                    GLuint waterTex = (plot.terrainType == 6)
+                        ? m_assets->getOceanWaterGL()
+                        : m_assets->getCoastWaterGL();
+                    if (waterTex) {
+                        if (waterTex != curBoundTex) {
+                            flushBatch();
+                            glBindTexture(GL_TEXTURE_2D, waterTex);
+                            m_shader.setInt("uUseTexture", 1);
+                            curBoundTex = waterTex;
+                        }
+                        // Scrolling UV for wave animation (texture tiles seamlessly)
+                        float timeS = SDL_GetTicks() * 0.00004f;
+                        float u0 = (float)x * 0.5f + timeS;
+                        float v0 = (float)y * 0.5f + timeS * 0.7f;
+                        float u1 = u0 + 0.5f;
+                        float v1 = v0 + 0.5f;
+                        pushQuad(screenTX, screenTY, screenTileSize, screenTileSize,
+                                 fogBright, fogBright, fogBright, 1.0f, waterTex, u0, v0, u1, v1);
+                    } else {
+                        // Fallback: solid water color
+                        float r, g, b;
+                        if (plot.terrainType == 6) { r=0.05f; g=0.14f; b=0.35f; }
+                        else { r=0.10f; g=0.30f; b=0.50f; }
+                        if (curBoundTex != m_whiteTexture) {
+                            flushBatch();
+                            glBindTexture(GL_TEXTURE_2D, m_whiteTexture);
+                            m_shader.setInt("uUseTexture", 0);
+                            curBoundTex = m_whiteTexture;
+                        }
+                        pushQuad(screenTX, screenTY, screenTileSize, screenTileSize,
+                                 r*fogBright, g*fogBright, b*fogBright, 1.0f);
                     }
-                    TerrainColor tc = getTerrainColor(plot.terrainType, plot.plotType);
-                    pushQuad(screenTX, screenTY, screenTileSize, screenTileSize,
-                             tc.r / 255.0f * fogBright, tc.g / 255.0f * fogBright,
-                             tc.b / 255.0f * fogBright, 1.0f);
                 } else {
-                    if (tex != curBoundTex) {
-                        flushBatch();
-                        glBindTexture(GL_TEXTURE_2D, tex);
-                        m_shader.setInt("uUseTexture", 1);
-                        curBoundTex = tex;
+                    // Land tiles: use blend textures with world-space UVs
+                    int blendKey = plot.terrainType;
+                    if (plot.plotType == 0) blendKey = -1; // Peak
+                    else if (plot.plotType == 1) blendKey = -2; // Hill
+
+                    GLuint tex = m_assets->getTerrainBlendGL(blendKey);
+                    if (!tex) tex = m_assets->getTerrainBlendGL(plot.terrainType);
+                    if (!tex) {
+                        if (curBoundTex != m_whiteTexture) {
+                            flushBatch();
+                            glBindTexture(GL_TEXTURE_2D, m_whiteTexture);
+                            m_shader.setInt("uUseTexture", 0);
+                            curBoundTex = m_whiteTexture;
+                        }
+                        TerrainColor tc = getTerrainColor(plot.terrainType, plot.plotType);
+                        pushQuad(screenTX, screenTY, screenTileSize, screenTileSize,
+                                 tc.r / 255.0f * fogBright, tc.g / 255.0f * fogBright,
+                                 tc.b / 255.0f * fogBright, 1.0f);
+                    } else {
+                        if (tex != curBoundTex) {
+                            flushBatch();
+                            glBindTexture(GL_TEXTURE_2D, tex);
+                            m_shader.setInt("uUseTexture", 1);
+                            curBoundTex = tex;
+                        }
+                        // World-space UV: texture repeats every 2 tiles for detail
+                        float tilesPerTex = 2.0f;
+                        float u0 = (float)x / tilesPerTex;
+                        float v0 = (float)y / tilesPerTex;
+                        float u1 = u0 + 1.0f / tilesPerTex;
+                        float v1 = v0 + 1.0f / tilesPerTex;
+                        pushQuad(screenTX, screenTY, screenTileSize, screenTileSize,
+                                 fogBright, fogBright, fogBright, 1.0f, tex, u0, v0, u1, v1);
                     }
-                    // UV tiling: each tile samples a different region of the 512px texture
-                    float tilesPerTex = 4.0f;
-                    float u0 = (float)(x % (int)tilesPerTex) / tilesPerTex + waterTimeOffset;
-                    float v0 = (float)(y % (int)tilesPerTex) / tilesPerTex + waterTimeOffset * 0.7f;
-                    float u1 = u0 + 1.0f / tilesPerTex;
-                    float v1 = v0 + 1.0f / tilesPerTex;
-                    pushQuad(screenTX, screenTY, screenTileSize, screenTileSize,
-                             fogBright, fogBright, fogBright, 1.0f, tex, u0, v0, u1, v1);
                 }
             } else {
                 // Flat color fallback (no blend textures)
@@ -881,12 +974,20 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                     int nOrder = getLayerOrder(nplot.terrainType, nplot.plotType);
                     if (nOrder <= myOrder) continue; // only blend from higher to lower
 
-                    // Get neighbor's blend texture
-                    int nBlendKey = nplot.terrainType;
-                    if (nplot.plotType == 0) nBlendKey = -1;
-                    else if (nplot.plotType == 1) nBlendKey = -2;
-                    GLuint nTex = m_assets->getTerrainBlendGL(nBlendKey);
-                    if (!nTex) nTex = m_assets->getTerrainBlendGL(nplot.terrainType);
+                    // For water-to-land transitions, use procedural water texture
+                    bool neighborIsWater = (nplot.terrainType == 5 || nplot.terrainType == 6);
+                    GLuint nTex = 0;
+                    if (neighborIsWater) {
+                        nTex = (nplot.terrainType == 6)
+                            ? m_assets->getOceanWaterGL()
+                            : m_assets->getCoastWaterGL();
+                    } else {
+                        int nBlendKey = nplot.terrainType;
+                        if (nplot.plotType == 0) nBlendKey = -1;
+                        else if (nplot.plotType == 1) nBlendKey = -2;
+                        nTex = m_assets->getTerrainBlendGL(nBlendKey);
+                        if (!nTex) nTex = m_assets->getTerrainBlendGL(nplot.terrainType);
+                    }
                     if (!nTex) continue;
 
                     if (nTex != curBoundTex) {
@@ -895,15 +996,15 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                         curBoundTex = nTex;
                     }
 
-                    // Blend strip: covers ~30% of this tile on the edge facing the neighbor
-                    float blendFrac = 0.30f;
+                    // Blend strip on the edge facing the neighbor
+                    float blendFrac = neighborIsWater ? 0.35f : 0.30f;
                     float bx = screenTX, by = screenTY, bw = screenTileSize, bh = screenTileSize;
-                    float alpha = 0.5f;
+                    float alpha = neighborIsWater ? 0.55f : 0.45f;
 
                     // UV for the blend strip (use neighbor tile coords for continuity)
-                    float tilesPerTex = 4.0f;
-                    float nu0 = (float)(nx % (int)tilesPerTex) / tilesPerTex;
-                    float nv0 = (float)(ny % (int)tilesPerTex) / tilesPerTex;
+                    float tilesPerTex = 2.0f;
+                    float nu0 = (float)nx / tilesPerTex;
+                    float nv0 = (float)ny / tilesPerTex;
                     float nu1 = nu0 + 1.0f / tilesPerTex;
                     float nv1 = nv0 + 1.0f / tilesPerTex;
 
@@ -969,9 +1070,9 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                     glBindTexture(GL_TEXTURE_2D, ftex);
                     curBoundTex = ftex;
                 }
-                float tilesPerTex = 4.0f;
-                float u0 = (float)(x % (int)tilesPerTex) / tilesPerTex;
-                float v0 = (float)(y % (int)tilesPerTex) / tilesPerTex;
+                float tilesPerTex = 2.0f;
+                float u0 = (float)x / tilesPerTex;
+                float v0 = (float)y / tilesPerTex;
                 float u1 = u0 + 1.0f / tilesPerTex;
                 float v1 = v0 + 1.0f / tilesPerTex;
                 pushQuad(screenTX, screenTY, screenTileSize, screenTileSize,
@@ -1116,7 +1217,7 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
     flushBatch();
 
     // --- Pass 2: City name labels ---
-    if (m_fontSmall && screenTileSize >= 8) {
+    if (isFontValid(m_fontSmall) && screenTileSize >= 8) {
         for (int vr = rowStart; vr <= rowEnd; vr++) {
             for (int vc = colStart; vc <= colEnd; vc++) {
                 int x2 = snapshot.wrapX ? ((vc % snapshot.width) + snapshot.width) % snapshot.width : vc;
@@ -1154,7 +1255,10 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
 // ---- HUD ----
 
 void GLRenderer::drawHUD(MapSnapshot& snapshot) {
-    if (!m_fontMedium) return;
+    if (!isFontValid(m_fontMedium)) return;
+
+    if (snapshot.humanPlayerID < 0 || snapshot.humanPlayerID >= 18)
+        return;
 
     const PlayerInfo& pi = snapshot.players[snapshot.humanPlayerID];
     char buf[512];
@@ -1193,7 +1297,7 @@ void GLRenderer::drawHUD(MapSnapshot& snapshot) {
 // ---- Turn banner ----
 
 void GLRenderer::drawTurnBanner(const MapSnapshot& snapshot) {
-    if (!m_fontLarge) return;
+    if (!isFontValid(m_fontLarge)) return;
 
     const char* msg = nullptr;
     uint8_t r = 255, g = 255, b = 200;
@@ -1223,7 +1327,7 @@ void GLRenderer::drawTurnBanner(const MapSnapshot& snapshot) {
 // ---- Game messages ----
 
 void GLRenderer::drawGameMessages(const MapSnapshot& snapshot) {
-    if (!m_fontSmall || snapshot.gameMessages.empty()) return;
+    if (!isFontValid(m_fontSmall) || snapshot.gameMessages.empty()) return;
 
     int startY = 56;
     int lineH = 16;
@@ -1246,7 +1350,7 @@ void GLRenderer::drawGameMessages(const MapSnapshot& snapshot) {
 // ---- Unit panel ----
 
 void GLRenderer::drawUnitPanel(const MapSnapshot& snapshot) {
-    if (!m_fontSmall || snapshot.selectedUnitID < 0) return;
+    if (!isFontValid(m_fontSmall) || snapshot.selectedUnitID < 0) return;
     if (snapshot.selectedUnitX < 0 || snapshot.selectedUnitY < 0) return;
     const PlotData& pd = snapshot.getPlot(snapshot.selectedUnitX, snapshot.selectedUnitY);
 
@@ -1291,7 +1395,7 @@ void GLRenderer::drawUnitPanel(const MapSnapshot& snapshot) {
 // ---- City panel ----
 
 void GLRenderer::drawCityPanel(const MapSnapshot& snapshot) {
-    if (!m_fontSmall || !snapshot.cityScreenOpen) return;
+    if (!isFontValid(m_fontSmall) || !snapshot.cityScreenOpen) return;
 
     const CityDetail& cd = snapshot.selectedCity;
     int panelW = 300;
@@ -1354,7 +1458,7 @@ void GLRenderer::drawCityPanel(const MapSnapshot& snapshot) {
 // ---- Tech picker ----
 
 void GLRenderer::drawTechPicker(const MapSnapshot& snapshot) {
-    if (!m_fontSmall || snapshot.availableTechs.empty()) return;
+    if (!isFontValid(m_fontSmall) || snapshot.availableTechs.empty()) return;
 
     int panelW = 280;
     int lineH = 18;
@@ -1393,7 +1497,7 @@ void GLRenderer::drawTechPicker(const MapSnapshot& snapshot) {
 // ---- Action bar ----
 
 void GLRenderer::drawActionBar(const MapSnapshot& snapshot) {
-    if (!m_fontSmall || !snapshot.isHumanTurn) return;
+    if (!isFontValid(m_fontSmall) || !snapshot.isHumanTurn) return;
 
     int barH = 24;
     int barY = m_windowH - barH - 30;
@@ -1473,7 +1577,7 @@ void GLRenderer::drawMinimap(const MapSnapshot& snapshot) {
 // ---- Help overlay ----
 
 void GLRenderer::drawHelpOverlay() {
-    if (!m_fontMedium) return;
+    if (!isFontValid(m_fontMedium)) return;
     const char* lines[] = {
         "Controls:",
         "  WASD/Arrows    - Pan camera",
@@ -1530,7 +1634,7 @@ void GLRenderer::drawHelpOverlay() {
 // ---- Tooltip ----
 
 void GLRenderer::drawTooltip(const MapSnapshot& snapshot) {
-    if (!m_fontSmall || snapshot.width == 0) return;
+    if (!isFontValid(m_fontSmall) || snapshot.width == 0) return;
     int tileX, tileY;
     if (!screenToTile(m_mouseX, m_mouseY, snapshot, tileX, tileY)) return;
 
@@ -1581,7 +1685,7 @@ void GLRenderer::drawTooltip(const MapSnapshot& snapshot) {
 // ---- Player panel ----
 
 void GLRenderer::drawPlayerPanel(const MapSnapshot& snapshot) {
-    if (!m_fontSmall) return;
+    if (!isFontValid(m_fontSmall)) return;
     int panelW = 220, lineH = 16, padX = 8, padY = 6;
     int alive = 0;
     for (int p = 0; p < snapshot.numPlayers; p++) if (snapshot.players[p].alive) alive++;

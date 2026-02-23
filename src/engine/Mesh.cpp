@@ -38,6 +38,15 @@ void Mesh::addSubmesh(const std::vector<MeshVertex>& vertices,
                       float alpha, bool alphaBlend) {
     if (vertices.empty() || indices.empty()) return;
 
+    // Track bounds
+    for (const auto& v : vertices) {
+        float vals[] = {v.px, v.py, v.pz};
+        for (float f : vals) {
+            if (f < m_boundsMin) m_boundsMin = f;
+            if (f > m_boundsMax) m_boundsMax = f;
+        }
+    }
+
     MeshSubmesh sm;
     sm.indexCount = (int)indices.size();
     sm.textureID = textureID;

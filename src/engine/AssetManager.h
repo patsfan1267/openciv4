@@ -39,6 +39,10 @@ public:
     GLuint getFeatureBlendGL(int featureType) const;
     bool hasBlendTextures() const { return !m_terrainBlendGL.empty(); }
 
+    // Procedural water textures (for ocean/coast tile fill)
+    GLuint getOceanWaterGL() const { return m_oceanWaterGL; }
+    GLuint getCoastWaterGL() const { return m_coastWaterGL; }
+
     // Check if textures are loaded
     bool hasTextures() const { return !m_terrainTextures.empty() || !m_terrainTexturesGL.empty(); }
 
@@ -72,6 +76,11 @@ private:
     // OpenGL blend textures (512x512 seamless terrain)
     std::unordered_map<int, GLuint> m_terrainBlendGL;
     std::unordered_map<int, GLuint> m_featureBlendGL;
+
+    // Procedural water textures
+    GLuint m_oceanWaterGL = 0;
+    GLuint m_coastWaterGL = 0;
+    void generateWaterTextures();
 
     SDL_Texture* createTextureFromRGBA(const uint8_t* pixels, int w, int h);
     SDL_Texture* loadTextureFromFPK(const FPKArchive& fpk, const std::string& path);

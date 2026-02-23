@@ -52,8 +52,11 @@ public:
 
     bool empty() const { return m_submeshes.empty(); }
     int submeshCount() const { return (int)m_submeshes.size(); }
+    float boundsMin() const { return m_boundsMin; }
+    float boundsMax() const { return m_boundsMax; }
 
 private:
     std::vector<MeshSubmesh> m_submeshes;
+    float m_boundsMin = 1e9f, m_boundsMax = -1e9f;
     void cleanup();
 };

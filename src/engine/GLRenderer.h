@@ -30,7 +30,7 @@ using CommandCallback = std::function<void(GameCommand)>;
 
 class GLRenderer {
 public:
-    GLRenderer() = default;
+    GLRenderer();
     ~GLRenderer();
 
     // Initialize OpenGL state, shaders, and geometry. Call after GL context is current.
@@ -41,6 +41,7 @@ public:
     void draw(MapSnapshot& snapshot);
 
     void setCommandCallback(CommandCallback cb) { m_pushCommand = cb; }
+    void setDisable3D(bool v) { m_disable3D = v; }
 
     // Input handling (same API as old Renderer)
     void handleKeyDown(SDL_Keycode key, MapSnapshot& snapshot);
@@ -68,6 +69,7 @@ private:
     bool m_showPlayerPanel = true;
     bool m_showGrid = false;
     bool m_showTechPicker = false;
+    bool m_disable3D = false; // --no-3d flag: skip 3D model rendering
     int m_techScrollOffset = 0;
 
     // Mouse

@@ -16,7 +16,9 @@
 struct Camera {
     float offsetX = 0.0f;
     float offsetY = 0.0f;
-    float zoom = 1.0f;
+    float zoom = 2.5f;
+    float tiltAngle = 0.6f;     // radians, 0 = top-down, ~0.6 = ~35 deg tilt (isometric-ish)
+    float rotationAngle = 0.0f; // radians, rotation around Y axis (0 = north-up)
 };
 
 // Callback for pushing game commands from the renderer

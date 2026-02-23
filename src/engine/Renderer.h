@@ -43,6 +43,9 @@ private:
     bool m_keyUp = false, m_keyDown = false, m_keyLeft = false, m_keyRight = false;
     float m_panSpeed = 400.0f; // pixels per second at zoom=1
 
+    // Delta-time tracking (milliseconds)
+    Uint32 m_lastFrameTime = 0;
+
     // Hex geometry constants (at zoom=1)
     // Flat-top hexagon: width = 2*R, height = sqrt(3)*R
     // Column spacing = 1.5*R (3/4 of width), row spacing = sqrt(3)*R

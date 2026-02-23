@@ -218,8 +218,13 @@ void Renderer::autoFitCamera(const MapSnapshot& snapshot)
 
 void Renderer::draw(MapSnapshot& snapshot)
 {
+    // Compute real delta-time
+    Uint32 now = SDL_GetTicks();
+    float dt = (m_lastFrameTime == 0) ? (1.0f / 60.0f) : ((now - m_lastFrameTime) / 1000.0f);
+    dt = std::min(dt, 0.1f);  // clamp to 100ms to avoid huge jumps
+    m_lastFrameTime = now;
+
     // Update camera position from held keys
-    float dt = 1.0f / 60.0f;
     float panDelta = m_panSpeed * dt / m_camera.zoom;
     if (m_keyUp)    m_camera.offsetY -= panDelta;
     if (m_keyDown)  m_camera.offsetY += panDelta;
@@ -264,6 +269,25 @@ void Renderer::draw(MapSnapshot& snapshot)
                 TerrainColor tc = getTerrainColor(plot.terrainType, plot.plotType);
                 drawFilledHex(screenCX, screenCY, screenRadius, tc.r, tc.g, tc.b);
 
+                // Hill indicator (small triangle inside hex)
+                if (plot.plotType == 1 && screenRadius >= 4) { // PLOT_HILLS
+                    SDL_SetRenderDrawColor(m_renderer,
+                        (uint8_t)std::min(255, tc.r + 30),
+                        (uint8_t)std::min(255, tc.g + 30),
+                        (uint8_t)std::min(255, tc.b + 30), 255);
+                    float h = screenRadius * 0.3f;
+                    float w = screenRadius * 0.25f;
+                    SDL_RenderDrawLine(m_renderer,
+                        (int)screenCX, (int)(screenCY - h),
+                        (int)(screenCX - w), (int)(screenCY + h * 0.3f));
+                    SDL_RenderDrawLine(m_renderer,
+                        (int)(screenCX - w), (int)(screenCY + h * 0.3f),
+                        (int)(screenCX + w), (int)(screenCY + h * 0.3f));
+                    SDL_RenderDrawLine(m_renderer,
+                        (int)(screenCX + w), (int)(screenCY + h * 0.3f),
+                        (int)screenCX, (int)(screenCY - h));
+                }
+
                 // Feature overlay (forest, jungle, etc.)
                 if (plot.featureType >= 0 && screenRadius >= 4) {
                     drawFeatureOverlay(screenCX, screenCY, screenRadius, plot.featureType);
@@ -300,6 +324,19 @@ void Renderer::draw(MapSnapshot& snapshot)
                 if (plot.isCity && screenRadius >= 2) {
                     drawFilledHex(screenCX, screenCY, screenRadius * 0.35f,
                                   plot.ownerColorR, plot.ownerColorG, plot.ownerColorB);
+                }
+
+                // Unit indicator (small filled square, offset from center)
+                if (plot.unitCount > 0 && !plot.isCity && screenRadius >= 3) {
+                    int sz = std::max(2, (int)(screenRadius * 0.3f));
+                    SDL_Rect uRect = {(int)(screenCX - sz / 2), (int)(screenCY - sz / 2), sz, sz};
+                    // Use owner color if owned, otherwise white
+                    if (plot.ownerID >= 0) {
+                        SDL_SetRenderDrawColor(m_renderer, plot.ownerColorR, plot.ownerColorG, plot.ownerColorB, 255);
+                    } else {
+                        SDL_SetRenderDrawColor(m_renderer, 220, 220, 220, 255);
+                    }
+                    SDL_RenderFillRect(m_renderer, &uRect);
                 }
             }
         }

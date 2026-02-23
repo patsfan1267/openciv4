@@ -9,8 +9,9 @@
 #include <algorithm>
 #include <cmath>
 
-Renderer::Renderer(SDL_Renderer* sdlRenderer, int windowW, int windowH)
+Renderer::Renderer(SDL_Renderer* sdlRenderer, int windowW, int windowH, AssetManager* assets)
     : m_renderer(sdlRenderer)
+    , m_assets(assets)
     , m_windowW(windowW)
     , m_windowH(windowH)
 {
@@ -53,6 +54,12 @@ void Renderer::drawFilledTile(float tx, float ty, float size, uint8_t r, uint8_t
     SDL_Rect rect = {(int)tx, (int)ty, (int)size, (int)size};
     SDL_SetRenderDrawColor(m_renderer, r, g, b, 255);
     SDL_RenderFillRect(m_renderer, &rect);
+}
+
+void Renderer::drawTexturedTile(float tx, float ty, float size, SDL_Texture* tex)
+{
+    SDL_Rect dst = {(int)tx, (int)ty, (int)size, (int)size};
+    SDL_RenderCopy(m_renderer, tex, nullptr, &dst);
 }
 
 void Renderer::drawTileOutline(float tx, float ty, float size, uint8_t r, uint8_t g, uint8_t b)
@@ -227,6 +234,7 @@ void Renderer::draw(MapSnapshot& snapshot)
     // Clear to dark ocean background
     SDL_SetRenderDrawColor(m_renderer, 10, 20, 40, 255);
     SDL_RenderClear(m_renderer);
+    SDL_SetRenderDrawBlendMode(m_renderer, SDL_BLENDMODE_BLEND);
 
     {
         std::lock_guard<std::mutex> lock(snapshot.mtx);
@@ -259,41 +267,48 @@ void Renderer::draw(MapSnapshot& snapshot)
                     screenTY + screenTileSize < 0 || screenTY > m_windowH)
                     continue;
 
-                // Terrain fill
-                TerrainColor tc = getTerrainColor(plot.terrainType, plot.plotType);
-                drawFilledTile(screenTX, screenTY, screenTileSize, tc.r, tc.g, tc.b);
+                // Terrain fill: use texture if available, else solid color
+                bool usedTexture = false;
+                if (m_assets && m_assets->hasTextures()) {
+                    // Check for plot-type override textures first (peak=-1, hill=-2)
+                    SDL_Texture* tex = nullptr;
+                    if (plot.plotType == 0) // PLOT_PEAK
+                        tex = m_assets->getTerrainTexture(-1);
+                    else if (plot.plotType == 1) // PLOT_HILLS
+                        tex = m_assets->getTerrainTexture(-2);
+                    if (!tex)
+                        tex = m_assets->getTerrainTexture(plot.terrainType);
+                    if (tex) {
+                        drawTexturedTile(screenTX, screenTY, screenTileSize, tex);
+                        usedTexture = true;
+                        // Darken hills slightly with a semi-transparent overlay
+                        if (plot.plotType == 1) {
+                            SDL_SetRenderDrawColor(m_renderer, 0, 0, 0, 40);
+                            SDL_Rect r = {(int)screenTX, (int)screenTY, (int)screenTileSize, (int)screenTileSize};
+                            SDL_RenderFillRect(m_renderer, &r);
+                        }
+                    }
+                }
+                if (!usedTexture) {
+                    TerrainColor tc = getTerrainColor(plot.terrainType, plot.plotType);
+                    drawFilledTile(screenTX, screenTY, screenTileSize, tc.r, tc.g, tc.b);
+                }
 
                 // Grid outline
                 if (m_showGrid && screenTileSize >= 4) {
                     drawTileOutline(screenTX, screenTY, screenTileSize, 40, 40, 50);
                 }
 
-                // Hill indicator (small triangle inside tile)
-                if (plot.plotType == 1 && screenTileSize >= 6) { // PLOT_HILLS
-                    float cx = screenTX + screenTileSize * 0.5f;
-                    float cy = screenTY + screenTileSize * 0.5f;
-                    SDL_SetRenderDrawColor(m_renderer,
-                        (uint8_t)std::min(255, tc.r + 30),
-                        (uint8_t)std::min(255, tc.g + 30),
-                        (uint8_t)std::min(255, tc.b + 30), 255);
-                    float h = screenTileSize * 0.2f;
-                    float w = screenTileSize * 0.15f;
-                    SDL_RenderDrawLine(m_renderer,
-                        (int)cx, (int)(cy - h),
-                        (int)(cx - w), (int)(cy + h * 0.3f));
-                    SDL_RenderDrawLine(m_renderer,
-                        (int)(cx - w), (int)(cy + h * 0.3f),
-                        (int)(cx + w), (int)(cy + h * 0.3f));
-                    SDL_RenderDrawLine(m_renderer,
-                        (int)(cx + w), (int)(cy + h * 0.3f),
-                        (int)cx, (int)(cy - h));
-                }
-
-                // Feature overlay (forest, jungle, etc.)
+                // Feature overlay: texture if available, else geometric symbols
                 if (plot.featureType >= 0 && screenTileSize >= 6) {
-                    float cx = screenTX + screenTileSize * 0.5f;
-                    float cy = screenTY + screenTileSize * 0.5f;
-                    drawFeatureOverlay(cx, cy, screenTileSize * 0.5f, plot.featureType);
+                    SDL_Texture* featTex = m_assets ? m_assets->getFeatureTexture(plot.featureType) : nullptr;
+                    if (featTex) {
+                        drawTexturedTile(screenTX, screenTY, screenTileSize, featTex);
+                    } else {
+                        float cx = screenTX + screenTileSize * 0.5f;
+                        float cy = screenTY + screenTileSize * 0.5f;
+                        drawFeatureOverlay(cx, cy, screenTileSize * 0.5f, plot.featureType);
+                    }
                 }
 
                 // River edges — thick blue lines on tile edges

@@ -9,6 +9,7 @@
 #include <SDL.h>
 #include <SDL_ttf.h>
 #include "MapSnapshot.h"
+#include "AssetManager.h"
 #include <string>
 
 struct Camera {
@@ -19,7 +20,7 @@ struct Camera {
 
 class Renderer {
 public:
-    Renderer(SDL_Renderer* sdlRenderer, int windowW, int windowH);
+    Renderer(SDL_Renderer* sdlRenderer, int windowW, int windowH, AssetManager* assets = nullptr);
     ~Renderer();
 
     // Initialize font system (call once after construction)
@@ -38,6 +39,7 @@ public:
 
 private:
     SDL_Renderer* m_renderer;
+    AssetManager* m_assets = nullptr;
     int m_windowW, m_windowH;
     Camera m_camera;
 
@@ -72,6 +74,7 @@ private:
     // Tile drawing helpers
     void tileTopLeft(int col, int row, int mapHeight, float& tx, float& ty) const;
     void drawFilledTile(float tx, float ty, float size, uint8_t r, uint8_t g, uint8_t b);
+    void drawTexturedTile(float tx, float ty, float size, SDL_Texture* tex);
     void drawTileOutline(float tx, float ty, float size, uint8_t r, uint8_t g, uint8_t b);
     void drawTileEdge(float tx, float ty, float size, int edge,
                       uint8_t r, uint8_t g, uint8_t b, int thickness);

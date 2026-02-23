@@ -7,6 +7,9 @@ add_library(engine STATIC
     pathfinding/FAStar.cpp
     pathfinding/RealFAStarIFace.cpp
     Renderer.cpp
+    FPKArchive.cpp
+    DDSLoader.cpp
+    AssetManager.cpp
 )
 
 target_include_directories(engine PUBLIC

@@ -79,6 +79,10 @@ static LONG WINAPI vehHandler(EXCEPTION_POINTERS* pExInfo) {
 #include "MapSnapshot.h"
 #include "Renderer.h"
 
+// Phase 1b: Asset loading
+#include "FPKArchive.h"
+#include "DDSLoader.h"
+
 // Global map snapshot shared between game thread and render thread
 static MapSnapshot g_mapSnapshot;
 static std::atomic<bool> g_gameRunning{true};
@@ -361,6 +365,100 @@ int main(int argc, char* argv[])
     fprintf(stderr, "Phase 0: Headless Mode\n");
     fprintf(stderr, "Build: 64-bit (%zu-byte pointers)\n\n", sizeof(void*));
     fprintf(stderr, "BTS Install: %s\n\n", BTS_INSTALL_DIR);
+
+    // ---- Quick-test modes (no gamecore init needed) ----
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--test-fpk") == 0) {
+            // Test the FPK archive reader against base game Art0.FPK
+            std::string fpkPath = std::string(BTS_INSTALL_DIR) + "/../Assets/Art0.FPK";
+            fprintf(stderr, "[test-fpk] Opening: %s\n", fpkPath.c_str());
+            FPKArchive fpk;
+            if (!fpk.open(fpkPath.c_str())) {
+                fprintf(stderr, "[test-fpk] FAILED to open FPK!\n");
+                return 1;
+            }
+            fprintf(stderr, "[test-fpk] Entries: %d\n", fpk.entryCount());
+
+            // Test hasFile with a known path
+            const char* testPath = "art/interface/buttons/techtree/hunting.dds";
+            fprintf(stderr, "[test-fpk] hasFile('%s') = %s\n",
+                    testPath, fpk.hasFile(testPath) ? "YES" : "NO");
+
+            // Read that file and verify DDS magic
+            auto data = fpk.readFile(testPath);
+            fprintf(stderr, "[test-fpk] readFile size = %zu\n", data.size());
+            if (data.size() >= 4) {
+                bool isDDS = (data[0] == 'D' && data[1] == 'D' && data[2] == 'S' && data[3] == ' ');
+                fprintf(stderr, "[test-fpk] DDS magic: %s\n", isDDS ? "VALID" : "INVALID");
+            }
+
+            // Count file types
+            int nDDS = 0, nNIF = 0, nKF = 0, nOther = 0;
+            for (auto& e : fpk.entries()) {
+                const std::string& fn = e.filename;
+                if (fn.size() >= 4) {
+                    std::string ext = fn.substr(fn.size() - 4);
+                    if (ext == ".dds") nDDS++;
+                    else if (ext == ".nif") nNIF++;
+                    else if (ext == ".kfm" || ext == ".kfa" || fn.find(".kf") != std::string::npos) nKF++;
+                    else nOther++;
+                } else nOther++;
+            }
+            fprintf(stderr, "[test-fpk] File types: %d DDS, %d NIF, %d KF/anim, %d other\n",
+                    nDDS, nNIF, nKF, nOther);
+            fprintf(stderr, "[test-fpk] ALL TESTS PASSED\n");
+            return 0;
+        }
+        if (strcmp(argv[i], "--test-dds") == 0) {
+            // Test DDS loading: open FPK, extract a terrain icon, decompress DXT3
+            std::string fpkPath = std::string(BTS_INSTALL_DIR) + "/../Assets/Art0.FPK";
+            FPKArchive fpk;
+            if (!fpk.open(fpkPath.c_str())) {
+                fprintf(stderr, "[test-dds] FAILED to open FPK!\n");
+                return 1;
+            }
+
+            // Test each terrain button icon
+            const char* terrainIcons[] = {
+                "art/interface/buttons/baseterrain/grassland.dds",
+                "art/interface/buttons/baseterrain/plains.dds",
+                "art/interface/buttons/baseterrain/desert.dds",
+                "art/interface/buttons/baseterrain/tundra.dds",
+                "art/interface/buttons/baseterrain/ice.dds",
+                "art/interface/buttons/baseterrain/coast.dds",
+                "art/interface/buttons/baseterrain/ocean.dds",
+                "art/interface/buttons/baseterrain/peak.dds",
+                "art/interface/buttons/baseterrain/hill.dds",
+            };
+
+            for (const char* icon : terrainIcons) {
+                auto ddsData = fpk.readFile(icon);
+                if (ddsData.empty()) {
+                    fprintf(stderr, "[test-dds] FAILED to read '%s' from FPK\n", icon);
+                    return 1;
+                }
+
+                DDSImage img;
+                if (!loadDDS(ddsData.data(), ddsData.size(), img)) {
+                    fprintf(stderr, "[test-dds] FAILED to decode '%s'\n", icon);
+                    return 1;
+                }
+
+                // Verify dimensions and pixel count
+                size_t expectedSize = img.width * img.height * 4;
+                fprintf(stderr, "[test-dds] %s: %ux%u, %zu pixels OK\n",
+                        icon, img.width, img.height, img.pixels.size() / 4);
+                if (img.pixels.size() != expectedSize) {
+                    fprintf(stderr, "[test-dds] WRONG pixel count! Expected %zu, got %zu\n",
+                            expectedSize, img.pixels.size());
+                    return 1;
+                }
+            }
+
+            fprintf(stderr, "[test-dds] ALL TESTS PASSED\n");
+            return 0;
+        }
+    }
 
     // ---- Step 1: Create our stub DLL interface ----
     OpenCiv4::StubUtilityIFace stubDLL;
@@ -702,8 +800,12 @@ int main(int argc, char* argv[])
                 } else {
                     fprintf(stderr, "[main] SDL2 window created (%dx%d).\n", winW, winH);
 
+                    // Load art assets from Civ4 installation
+                    AssetManager assetMgr;
+                    assetMgr.init(sdlRenderer, BTS_INSTALL_DIR);
+
                     // Create renderer and load fonts
-                    Renderer renderer(sdlRenderer, winW, winH);
+                    Renderer renderer(sdlRenderer, winW, winH, &assetMgr);
                     renderer.initFonts("assets/fonts/DejaVuSans.ttf");
 
                     // Start game on background thread

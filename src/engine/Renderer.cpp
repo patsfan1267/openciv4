@@ -344,25 +344,46 @@ void Renderer::draw(MapSnapshot& snapshot)
                     }
                 }
 
-                // Territory border
+                // Territory border — draw colored edges only where neighbor has different owner
+                // Hex neighbors for flat-top offset coordinates (odd columns shifted down):
+                // Edge 0 (right):        neighbor (+1, col%2==0 ? -1 : 0) — SE/E
+                // Edge 1 (bottom-right): neighbor (0, -1) — S (lower Y)
+                // Edge 2 (bottom-left):  neighbor (-1, col%2==0 ? -1 : 0) — SW/W
+                // Edge 3 (left):         neighbor (-1, col%2==0 ? 0 : 1) — NW/W
+                // Edge 4 (top):          neighbor (0, +1) — N (higher Y)
+                // Edge 5 (top-right):    neighbor (+1, col%2==0 ? 0 : 1) — NE/E
                 if (plot.ownerID >= 0 && screenRadius >= 2) {
-                    bool needBorder = false;
+                    int borderThk = std::max(1, (int)(screenRadius * 0.12f));
+                    int even = (x % 2 == 0) ? 1 : 0;
 
-                    if (x + 1 < snapshot.width && snapshot.getPlot(x + 1, y).ownerID != plot.ownerID)
-                        needBorder = true;
-                    if (x - 1 >= 0 && snapshot.getPlot(x - 1, y).ownerID != plot.ownerID)
-                        needBorder = true;
-                    if (y + 1 < snapshot.height && snapshot.getPlot(x, y + 1).ownerID != plot.ownerID)
-                        needBorder = true;
-                    if (y - 1 >= 0 && snapshot.getPlot(x, y - 1).ownerID != plot.ownerID)
-                        needBorder = true;
+                    // Neighbor offsets: {dx, dy} for each of the 6 edges
+                    // Note: BTS Y increases northward; our hexCenter flips Y for screen
+                    int nDx[6] = { +1,  0, -1, -1,  0, +1 };
+                    int nDy[6];
+                    if (even) {
+                        // even column
+                        nDy[0] = -1; nDy[1] = -1; nDy[2] = -1;
+                        nDy[3] =  0; nDy[4] =  1; nDy[5] =  0;
+                    } else {
+                        // odd column
+                        nDy[0] =  0; nDy[1] = -1; nDy[2] =  0;
+                        nDy[3] =  1; nDy[4] =  1; nDy[5] =  1;
+                    }
 
-                    if (x == 0 || x == snapshot.width - 1 || y == 0 || y == snapshot.height - 1)
-                        needBorder = true;
-
-                    if (needBorder) {
-                        drawHexOutline(screenCX, screenCY, screenRadius,
-                                       plot.ownerColorR, plot.ownerColorG, plot.ownerColorB);
+                    for (int e = 0; e < 6; e++) {
+                        int nx = x + nDx[e];
+                        int ny = y + nDy[e];
+                        bool drawEdge = false;
+                        if (nx < 0 || nx >= snapshot.width || ny < 0 || ny >= snapshot.height) {
+                            drawEdge = true; // map edge = border
+                        } else if (snapshot.getPlot(nx, ny).ownerID != plot.ownerID) {
+                            drawEdge = true;
+                        }
+                        if (drawEdge) {
+                            drawHexEdge(screenCX, screenCY, screenRadius, e,
+                                        plot.ownerColorR, plot.ownerColorG, plot.ownerColorB,
+                                        borderThk);
+                        }
                     }
                 }
 
@@ -425,10 +446,11 @@ void Renderer::draw(MapSnapshot& snapshot)
             }
         }
 
-        // --- HUD and minimap ---
+        // --- HUD, minimap, tooltip ---
         drawHUD(snapshot);
         if (m_showMinimap)
             drawMinimap(snapshot);
+        drawTooltip(snapshot);
         if (m_showHelp)
             drawHelpOverlay();
     }
@@ -606,6 +628,108 @@ void Renderer::drawHelpOverlay()
     }
 }
 
+// ---------- Tooltip ----------
+
+void Renderer::drawTooltip(const MapSnapshot& snapshot)
+{
+    if (!m_fontSmall || snapshot.width == 0) return;
+
+    // Convert screen coords to world coords
+    float worldX = m_mouseX / m_camera.zoom + m_camera.offsetX;
+    float worldY = m_mouseY / m_camera.zoom + m_camera.offsetY;
+
+    // Find which hex the mouse is over by checking distance to each nearby hex center
+    // Approximate column from worldX, then check nearby columns
+    int approxCol = (int)((worldX - HEX_RADIUS + COL_SPACING / 2) / COL_SPACING);
+    approxCol = std::max(0, std::min(approxCol, snapshot.width - 1));
+
+    int bestCol = -1, bestRow = -1;
+    float bestDist = 1e9f;
+
+    for (int dc = -1; dc <= 1; dc++) {
+        int col = approxCol + dc;
+        if (col < 0 || col >= snapshot.width) continue;
+
+        for (int row = 0; row < snapshot.height; row++) {
+            float hcx, hcy;
+            hexCenter(col, row, snapshot.height, hcx, hcy);
+            float dx = worldX - hcx;
+            float dy = worldY - hcy;
+            float dist = dx * dx + dy * dy;
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestCol = col;
+                bestRow = row;
+            }
+        }
+    }
+
+    // Check if we're actually within the hex radius
+    if (bestCol < 0 || bestDist > HEX_RADIUS * HEX_RADIUS * 1.2f) return;
+
+    const PlotData& plot = snapshot.getPlot(bestCol, bestRow);
+
+    // Build tooltip text
+    static const char* terrainNames[] = {
+        "Grass", "Plains", "Desert", "Tundra", "Snow", "Coast", "Ocean", "Peak", "Hill"
+    };
+    static const char* plotNames[] = { "Peak", "Hills", "Land", "Ocean" };
+
+    const char* tName = (plot.terrainType >= 0 && plot.terrainType <= 8)
+                        ? terrainNames[plot.terrainType] : "???";
+    const char* pName = (plot.plotType >= 0 && plot.plotType <= 3)
+                        ? plotNames[plot.plotType] : "???";
+
+    char line1[128], line2[128];
+    snprintf(line1, sizeof(line1), "(%d, %d) %s %s", bestCol, bestRow, tName, pName);
+
+    // Second line: features, river, owner
+    line2[0] = '\0';
+    static const char* featureNames[] = {
+        "Forest", "Jungle", "Oasis", "FP?", "FloodPlains", "Fallout", "Ice"
+    };
+    if (plot.featureType >= 0 && plot.featureType <= 6) {
+        snprintf(line2, sizeof(line2), "%s", featureNames[plot.featureType]);
+    }
+    if (plot.isRiver) {
+        char tmp[64];
+        snprintf(tmp, sizeof(tmp), "%sRiver", line2[0] ? ", " : "");
+        strncat(line2, tmp, sizeof(line2) - strlen(line2) - 1);
+    }
+    if (plot.unitCount > 0) {
+        char tmp[64];
+        snprintf(tmp, sizeof(tmp), "%s%d unit%s", line2[0] ? ", " : "",
+                 plot.unitCount, plot.unitCount > 1 ? "s" : "");
+        strncat(line2, tmp, sizeof(line2) - strlen(line2) - 1);
+    }
+
+    // Draw tooltip near mouse cursor
+    int tipX = m_mouseX + 16;
+    int tipY = m_mouseY + 4;
+
+    int tw1 = 0, th1 = 0, tw2 = 0, th2 = 0;
+    TTF_SizeText(m_fontSmall, line1, &tw1, &th1);
+    if (line2[0])
+        TTF_SizeText(m_fontSmall, line2, &tw2, &th2);
+
+    int boxW = std::max(tw1, tw2) + 8;
+    int boxH = th1 + (line2[0] ? th2 + 2 : 0) + 6;
+
+    // Keep on screen
+    if (tipX + boxW > m_windowW) tipX = m_mouseX - boxW - 8;
+    if (tipY + boxH > m_windowH) tipY = m_mouseY - boxH - 4;
+
+    SDL_Rect bg = {tipX, tipY, boxW, boxH};
+    SDL_SetRenderDrawColor(m_renderer, 20, 20, 30, 220);
+    SDL_RenderFillRect(m_renderer, &bg);
+    SDL_SetRenderDrawColor(m_renderer, 80, 100, 80, 255);
+    SDL_RenderDrawRect(m_renderer, &bg);
+
+    drawText(line1, tipX + 4, tipY + 3, m_fontSmall, 220, 230, 200);
+    if (line2[0])
+        drawText(line2, tipX + 4, tipY + 3 + th1 + 2, m_fontSmall, 180, 200, 180);
+}
+
 // ---------- Input handling ----------
 
 void Renderer::handleKeyDown(SDL_Keycode key, MapSnapshot& snapshot)
@@ -660,6 +784,12 @@ void Renderer::handleMouseWheel(int y, int mouseX, int mouseY)
 
 void Renderer::handleMouseMotion(int dx, int dy, bool anyDragButton)
 {
+    // Track mouse position for tooltip
+    int mx, my;
+    SDL_GetMouseState(&mx, &my);
+    m_mouseX = mx;
+    m_mouseY = my;
+
     if (anyDragButton) {
         m_camera.offsetX -= dx / m_camera.zoom;
         m_camera.offsetY -= dy / m_camera.zoom;

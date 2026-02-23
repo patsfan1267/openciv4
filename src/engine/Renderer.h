@@ -54,8 +54,9 @@ private:
     // Mouse position (for hover tooltip)
     int m_mouseX = 0, m_mouseY = 0;
 
-    // Player panel toggle
+    // Player panel / grid toggles
     bool m_showPlayerPanel = true;
+    bool m_showGrid = false;
 
     // Hex geometry constants (at zoom=1)
     // Flat-top hexagon: width = 2*R, height = sqrt(3)*R

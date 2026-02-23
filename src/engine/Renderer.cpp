@@ -302,6 +302,11 @@ void Renderer::draw(MapSnapshot& snapshot)
                 TerrainColor tc = getTerrainColor(plot.terrainType, plot.plotType);
                 drawFilledHex(screenCX, screenCY, screenRadius, tc.r, tc.g, tc.b);
 
+                // Grid outline
+                if (m_showGrid && screenRadius >= 3) {
+                    drawHexOutline(screenCX, screenCY, screenRadius, 40, 40, 50);
+                }
+
                 // Hill indicator (small triangle inside hex)
                 if (plot.plotType == 1 && screenRadius >= 4) { // PLOT_HILLS
                     SDL_SetRenderDrawColor(m_renderer,
@@ -608,6 +613,7 @@ void Renderer::drawHelpOverlay()
         "  Space          - Pause / unpause game",
         "  +/-            - Slower / faster turns",
         "  P              - Toggle player panel",
+        "  G              - Toggle hex grid",
         "  M              - Toggle minimap",
         "  H              - Toggle this help",
         "  Escape         - Quit",
@@ -654,19 +660,27 @@ void Renderer::drawTooltip(const MapSnapshot& snapshot)
     float worldX = m_mouseX / m_camera.zoom + m_camera.offsetX;
     float worldY = m_mouseY / m_camera.zoom + m_camera.offsetY;
 
-    // Find which hex the mouse is over by checking distance to each nearby hex center
-    // Approximate column from worldX, then check nearby columns
+    // Approximate column from worldX
     int approxCol = (int)((worldX - HEX_RADIUS + COL_SPACING / 2) / COL_SPACING);
-    approxCol = std::max(0, std::min(approxCol, snapshot.width - 1));
+
+    // Approximate flipped row from worldY, accounting for odd-column offset
+    float baseY = worldY - HEX_HEIGHT / 2.0f;
+    int approxFlippedRow = (int)(baseY / ROW_SPACING);
+    // Convert flipped row back to game row
+    int approxRow = snapshot.height - 1 - approxFlippedRow;
 
     int bestCol = -1, bestRow = -1;
     float bestDist = 1e9f;
 
+    // Check a small neighborhood around the approximate position
     for (int dc = -1; dc <= 1; dc++) {
         int col = approxCol + dc;
         if (col < 0 || col >= snapshot.width) continue;
 
-        for (int row = 0; row < snapshot.height; row++) {
+        for (int dr = -2; dr <= 2; dr++) {
+            int row = approxRow + dr;
+            if (row < 0 || row >= snapshot.height) continue;
+
             float hcx, hcy;
             hexCenter(col, row, snapshot.height, hcx, hcy);
             float dx = worldX - hcx;
@@ -820,6 +834,9 @@ void Renderer::handleKeyDown(SDL_Keycode key, MapSnapshot& snapshot)
             break;
         case SDLK_p:
             m_showPlayerPanel = !m_showPlayerPanel;
+            break;
+        case SDLK_g:
+            m_showGrid = !m_showGrid;
             break;
     }
 }

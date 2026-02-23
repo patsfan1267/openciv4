@@ -339,6 +339,15 @@ void Renderer::draw(MapSnapshot& snapshot)
                     drawFilledTile(screenTX, screenTY, screenTileSize, tc.r, tc.g, tc.b);
                 }
 
+                // Territory fill — subtle overlay in owner's color for owned tiles
+                if (plot.ownerID >= 0) {
+                    SDL_SetRenderDrawColor(m_renderer,
+                        plot.ownerColorR, plot.ownerColorG, plot.ownerColorB, 45);
+                    SDL_Rect terr = {(int)screenTX, (int)screenTY,
+                                     (int)screenTileSize, (int)screenTileSize};
+                    SDL_RenderFillRect(m_renderer, &terr);
+                }
+
                 // Grid outline
                 if (m_showGrid && screenTileSize >= 4) {
                     drawTileOutline(screenTX, screenTY, screenTileSize, 40, 40, 50);
@@ -742,13 +751,25 @@ void Renderer::drawTooltip(const MapSnapshot& snapshot)
     char line1[128], line2[128];
     snprintf(line1, sizeof(line1), "(%d, %d) %s %s", col, row, tName, pName);
 
-    // Second line: features, river, owner
+    // Second line: features, bonus, river, owner
     line2[0] = '\0';
     static const char* featureNames[] = {
         "Forest", "Jungle", "Oasis", "FP?", "FloodPlains", "Fallout", "Ice"
     };
+    static const char* bonusNames[] = {
+        "Aluminum", "Banana", "Clam", "Coal", "Copper", "Corn", "Cow",
+        "Crab", "Deer", "Dye", "Fish", "Fur", "Gems", "Gold", "Horse",
+        "Incense", "Iron", "Ivory", "Marble", "Oil", "Pig", "Rice",
+        "Sheep", "Silk", "Silver", "Spices", "Stone", "Sugar", "Uranium",
+        "Whale", "Wheat", "Wine", "Drama", "Music", "Movies"
+    };
     if (plot.featureType >= 0 && plot.featureType <= 6) {
         snprintf(line2, sizeof(line2), "%s", featureNames[plot.featureType]);
+    }
+    if (plot.bonusType >= 0 && plot.bonusType <= 34) {
+        char tmp[64];
+        snprintf(tmp, sizeof(tmp), "%s%s", line2[0] ? ", " : "", bonusNames[plot.bonusType]);
+        strncat(line2, tmp, sizeof(line2) - strlen(line2) - 1);
     }
     if (plot.isRiver) {
         char tmp[64];

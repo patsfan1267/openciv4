@@ -140,6 +140,7 @@ static void updateMapSnapshot()
         pd.terrainType = (int)pPlot->getTerrainType();
         pd.plotType = (int)pPlot->getPlotType();
         pd.featureType = (int)pPlot->getFeatureType();
+        pd.bonusType = (int)pPlot->getBonusType();
         pd.ownerID = (int)pPlot->getOwnerINLINE();
         pd.isRiver = pPlot->isRiver();
         pd.isNOfRiver = pPlot->isNOfRiver();

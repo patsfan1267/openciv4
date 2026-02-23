@@ -14,6 +14,7 @@ struct PlotData {
     int terrainType;    // TerrainTypes enum value
     int plotType;       // PlotTypes: 0=PEAK, 1=HILLS, 2=LAND, 3=OCEAN
     int featureType;    // FeatureTypes enum value (-1 = none)
+    int bonusType;      // BonusTypes enum value (-1 = none)
     int ownerID;        // PlayerTypes (-1 = no owner)
     bool isRiver;
     bool isNOfRiver;    // river along north edge of this plot

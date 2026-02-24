@@ -617,7 +617,7 @@ void GLRenderer::tileTopLeft(int col, int row, int mapHeight, float& tx, float& 
 bool GLRenderer::screenToTile(int screenX, int screenY, const MapSnapshot& snapshot,
                                int& tileX, int& tileY) {
     if (m_use3DTerrain) {
-        // Unproject screen point through inverse VP, intersect with Y=0 plane
+        // Unproject screen point through inverse VP, ray march against terrain heightfield
         float invVP[16];
         if (!mat4::invert(invVP, m_vpMatrix)) return false;
 
@@ -625,7 +625,7 @@ bool GLRenderer::screenToTile(int screenX, int screenY, const MapSnapshot& snaps
         float ndcX = (2.0f * screenX / m_windowW) - 1.0f;
         float ndcY = 1.0f - (2.0f * screenY / m_windowH); // flip Y
 
-        // Near point in clip space
+        // Near and far points in clip space
         float nearPt[4] = { ndcX, ndcY, -1.0f, 1.0f };
         float farPt[4]  = { ndcX, ndcY,  1.0f, 1.0f };
 
@@ -646,27 +646,55 @@ bool GLRenderer::screenToTile(int screenX, int screenY, const MapSnapshot& snaps
         float dx = wFar[0] - wNear[0];
         float dy = wFar[1] - wNear[1];
         float dz = wFar[2] - wNear[2];
+        float dlen = sqrtf(dx*dx + dy*dy + dz*dz);
+        if (dlen < 1e-8f) return false;
+        dx /= dlen; dy /= dlen; dz /= dlen;
 
-        // Intersect with Y=0 plane
-        if (fabsf(dy) < 1e-8f) return false; // ray parallel to ground
-        float t = -wNear[1] / dy;
-        if (t < 0) return false; // behind camera
+        // Ray march: step along ray in 0.5-unit increments, detect when ray crosses terrain
+        float maxDist = m_cam3D.farZ;
+        float step = 0.5f;
+        float prevY = wNear[1];
+        float prevH = m_terrainMesh.getHeight(wNear[0], wNear[2]);
+        bool prevAbove = (prevY >= prevH);
 
-        float hitX = wNear[0] + t * dx;
-        float hitZ = wNear[2] + t * dz;
+        for (float t = step; t < maxDist; t += step) {
+            float px = wNear[0] + t * dx;
+            float py = wNear[1] + t * dy;
+            float pz = wNear[2] + t * dz;
+            float terrH = m_terrainMesh.getHeight(px, pz);
+            bool above = (py >= terrH);
 
-        int col = (int)floorf(hitX);
-        int flippedRow = (int)floorf(hitZ);
+            if (prevAbove && !above) {
+                // Ray crossed below terrain between t-step and t — binary search to refine
+                float lo = t - step, hi = t;
+                for (int i = 0; i < 8; i++) {
+                    float mid = (lo + hi) * 0.5f;
+                    float mx = wNear[0] + mid * dx;
+                    float my = wNear[1] + mid * dy;
+                    float mz = wNear[2] + mid * dz;
+                    float mh = m_terrainMesh.getHeight(mx, mz);
+                    if (my >= mh) lo = mid; else hi = mid;
+                }
+                float hitT = (lo + hi) * 0.5f;
+                float hitX = wNear[0] + hitT * dx;
+                float hitZ = wNear[2] + hitT * dz;
 
-        if (snapshot.wrapX) col = ((col % snapshot.width) + snapshot.width) % snapshot.width;
-        if (snapshot.wrapY) flippedRow = ((flippedRow % snapshot.height) + snapshot.height) % snapshot.height;
+                int col = (int)floorf(hitX);
+                int flippedRow = (int)floorf(hitZ);
 
-        int row = snapshot.height - 1 - flippedRow;
-        if (col < 0 || col >= snapshot.width || row < 0 || row >= snapshot.height)
-            return false;
-        tileX = col;
-        tileY = row;
-        return true;
+                if (snapshot.wrapX) col = ((col % snapshot.width) + snapshot.width) % snapshot.width;
+                if (snapshot.wrapY) flippedRow = ((flippedRow % snapshot.height) + snapshot.height) % snapshot.height;
+
+                int row = snapshot.height - 1 - flippedRow;
+                if (col < 0 || col >= snapshot.width || row < 0 || row >= snapshot.height)
+                    return false;
+                tileX = col;
+                tileY = row;
+                return true;
+            }
+            prevAbove = above;
+        }
+        return false;
     }
 
     // Legacy 2D path

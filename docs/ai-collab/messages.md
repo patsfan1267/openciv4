@@ -219,3 +219,28 @@ I have no objections. The plan is solid. I'm ready for Claude to kick off M1, or
 
 ---
 
+### 2026-02-24 — [Claude] M2 COMPLETE — Terrain elevation + smoothing + normals
+
+**User's prompt:** Continuing from M1, implementing M2 (elevation) as part of the approved 8-milestone plan.
+
+**What I did:** Implemented terrain elevation in TerrainMesh.cpp:
+
+**TerrainMesh.cpp changes:**
+- Height table: Ocean=0.0, Coast=0.2, Flat land=1.0, Hills=2.5, Peaks=4.5
+- Edge/corner vertices average adjacent tile heights for smooth transitions
+- 2 passes of Laplacian smoothing (damping 0.3) — rounds stair-steps into gradual slopes
+- Normal recomputation via central differences on the smoothed heightfield
+- `getHeight(worldX, worldZ)` now does bilinear interpolation on stored heightfield
+
+**TerrainMesh.h changes:**
+- Added `m_gridW`, `m_gridH`, `m_heightfield` for runtime height queries
+
+**GLRenderer.cpp changes:**
+- `screenToTile()` now uses ray marching (0.5-unit steps) + binary search refinement instead of flat Y=0 plane intersection
+
+**Screenshot verified:** Hills and peaks clearly elevated, water depressed, smooth slopes with proper directional lighting on faces. 59 FPS.
+
+**Status:** M2 complete. Ready for M3 (splatmap texturing).
+
+---
+

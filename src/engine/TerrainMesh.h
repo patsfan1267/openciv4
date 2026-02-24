@@ -32,8 +32,7 @@ public:
     // Draw the terrain mesh. Caller must have set up shader + VP uniforms.
     void draw() const;
 
-    // Query terrain height at a world position (bilinear interpolation)
-    // Returns 0.0 for M1 (flat terrain)
+    // Query terrain height at a world position (bilinear interpolation on heightfield)
     float getHeight(float worldX, float worldZ) const;
 
     bool empty() const { return m_indexCount == 0; }
@@ -52,6 +51,10 @@ private:
 
     // Subdivision level per tile edge (4 = 4x4 grid = 25 verts per tile)
     static constexpr int SUBDIV = 4;
+
+    // Heightfield for runtime queries (same grid as vertex positions)
+    int m_gridW = 0, m_gridH = 0;
+    std::vector<float> m_heightfield;
 
     void cleanup();
 };

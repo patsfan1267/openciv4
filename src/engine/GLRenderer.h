@@ -10,6 +10,7 @@
 #include "MapSnapshot.h"
 #include "AssetManager.h"
 #include "ShaderProgram.h"
+#include "TerrainMesh.h"
 #include <string>
 #include <functional>
 #include <unordered_map>
@@ -27,6 +28,18 @@ struct Camera {
 };
 using CommandCallback = std::function<void(GameCommand)>;
 #endif
+
+// 3D orbit camera for terrain viewing
+struct Camera3D {
+    float focalX = 0.0f;       // world-space focal point X (East)
+    float focalZ = 0.0f;       // world-space focal point Z (South)
+    float distance = 15.0f;    // distance from focal point
+    float azimuth = 0.0f;      // horizontal rotation (radians, 0 = looking south)
+    float elevation = 0.8f;    // vertical angle (radians, 0 = horizon, PI/2 = top-down)
+    float fovY = 0.8f;         // field of view (radians, ~45 degrees)
+    float nearZ = 0.1f;
+    float farZ = 200.0f;
+};
 
 class GLRenderer {
 public:
@@ -55,7 +68,9 @@ public:
 private:
     AssetManager* m_assets = nullptr;
     int m_windowW = 0, m_windowH = 0;
-    Camera m_camera;
+    Camera m_camera;       // legacy 2D camera (kept for HUD coordinate mapping)
+    Camera3D m_cam3D;      // 3D orbit camera for terrain
+    bool m_use3DTerrain = true; // true = 3D terrain mesh, false = legacy 2D terrain
     CommandCallback m_pushCommand;
 
     // Key state for smooth panning
@@ -87,8 +102,14 @@ private:
     int m_prodScrollOffset = 0;
 
     // --- OpenGL resources ---
-    ShaderProgram m_shader;   // unified color+texture shader (2D quads)
-    ShaderProgram m_shader3D; // 3D model shader (MVP + lighting)
+    ShaderProgram m_shader;        // unified color+texture shader (2D quads)
+    ShaderProgram m_shader3D;      // 3D model shader (MVP + lighting)
+    ShaderProgram m_shaderTerrain; // 3D terrain shader (pos+normal+color, MVP + lighting)
+
+    // 3D terrain mesh
+    TerrainMesh m_terrainMesh;
+    bool m_terrainMeshBuilt = false;
+    float m_vpMatrix[16] = {};  // cached view-projection matrix for screenToTile
 
     // Dynamic quad batch: position(2) + uv(2) + color(4) = 8 floats per vertex
     GLuint m_batchVAO = 0, m_batchVBO = 0;
@@ -141,8 +162,13 @@ private:
     bool screenToTile(int screenX, int screenY, const MapSnapshot& snapshot, int& tileX, int& tileY);
 
     // Drawing routines
-    void drawTerrain(const MapSnapshot& snapshot);
+    void drawTerrain(const MapSnapshot& snapshot);     // legacy 2D terrain
+    void drawTerrain3D(const MapSnapshot& snapshot);   // new 3D terrain mesh
     void draw3DModels(const MapSnapshot& snapshot);
+
+    // 3D camera helpers
+    void buildCamera3DMatrices(float* view, float* proj) const;
+    void autoFitCamera3D(const MapSnapshot& snapshot);
     void drawSelectionHighlight(float screenTX, float screenTY, float screenTileSize);
     void drawHUD(MapSnapshot& snapshot);
     void drawMinimap(const MapSnapshot& snapshot);

@@ -212,9 +212,9 @@ void AssetManager::generateWaterTextures() {
             float w3 = sinf(fx * 22.0f + fy * 5.0f + 3.1f) * 0.5f + 0.5f;
             float wave = (w1 * 0.4f + w2 * 0.35f + w3 * 0.25f);
             int idx = (y * W + x) * 4;
-            pixels[idx+0] = (uint8_t)(12 + wave * 25);   // R
-            pixels[idx+1] = (uint8_t)(35 + wave * 45);   // G
-            pixels[idx+2] = (uint8_t)(85 + wave * 70);   // B
+            pixels[idx+0] = (uint8_t)(40 + wave * 40);   // R
+            pixels[idx+1] = (uint8_t)(70 + wave * 60);   // G
+            pixels[idx+2] = (uint8_t)(140 + wave * 60);  // B
             pixels[idx+3] = 255;
         }
     }
@@ -229,9 +229,9 @@ void AssetManager::generateWaterTextures() {
             float w3 = sinf(fx * 20.0f + fy * 6.0f + 4.0f) * 0.5f + 0.5f;
             float wave = (w1 * 0.4f + w2 * 0.35f + w3 * 0.25f);
             int idx = (y * W + x) * 4;
-            pixels[idx+0] = (uint8_t)(25 + wave * 35);   // R
-            pixels[idx+1] = (uint8_t)(75 + wave * 60);   // G
-            pixels[idx+2] = (uint8_t)(120 + wave * 65);  // B
+            pixels[idx+0] = (uint8_t)(50 + wave * 50);   // R
+            pixels[idx+1] = (uint8_t)(110 + wave * 60);  // G
+            pixels[idx+2] = (uint8_t)(160 + wave * 50);  // B
             pixels[idx+3] = 255;
         }
     }

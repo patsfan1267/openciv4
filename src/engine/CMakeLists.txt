@@ -14,6 +14,7 @@ add_library(engine STATIC
     AssetManager.cpp
     NifLoader.cpp
     Mesh.cpp
+    TerrainMesh.cpp
 )
 
 # glad (OpenGL loader) - compiled as C

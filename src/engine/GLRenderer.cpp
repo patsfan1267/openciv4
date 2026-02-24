@@ -120,6 +120,181 @@ void main() {
 }
 )";
 
+// ---- 3D Terrain shader (M1: vertex color + lighting) ----
+
+static const char* VERT_TERRAIN_SRC = R"(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec3 aColor;
+
+uniform mat4 uMVP;
+
+out vec3 vNormal;
+out vec3 vColor;
+
+void main() {
+    gl_Position = uMVP * vec4(aPos, 1.0);
+    vNormal = aNormal;
+    vColor = aColor;
+}
+)";
+
+static const char* FRAG_TERRAIN_SRC = R"(
+#version 330 core
+in vec3 vNormal;
+in vec3 vColor;
+
+uniform vec3 uLightDir;
+uniform vec3 uAmbient;
+
+out vec4 fragColor;
+
+void main() {
+    vec3 N = normalize(vNormal);
+    float NdotL = max(dot(N, uLightDir), 0.0);
+    vec3 lighting = uAmbient + vec3(0.8) * NdotL;
+    fragColor = vec4(vColor * lighting, 1.0);
+}
+)";
+
+// Simple 4x4 matrix helpers for 3D rendering (column-major for OpenGL)
+namespace mat4 {
+    static void identity(float* m) {
+        memset(m, 0, 16 * sizeof(float));
+        m[0] = m[5] = m[10] = m[15] = 1.0f;
+    }
+
+    static void ortho(float* m, float left, float right, float bottom, float top, float near, float far) {
+        memset(m, 0, 16 * sizeof(float));
+        m[0]  = 2.0f / (right - left);
+        m[5]  = 2.0f / (top - bottom);
+        m[10] = -2.0f / (far - near);
+        m[12] = -(right + left) / (right - left);
+        m[13] = -(top + bottom) / (top - bottom);
+        m[14] = -(far + near) / (far - near);
+        m[15] = 1.0f;
+    }
+
+    static void translate(float* m, float tx, float ty, float tz) {
+        identity(m);
+        m[12] = tx; m[13] = ty; m[14] = tz;
+    }
+
+    static void scale(float* m, float sx, float sy, float sz) {
+        memset(m, 0, 16 * sizeof(float));
+        m[0] = sx; m[5] = sy; m[10] = sz; m[15] = 1.0f;
+    }
+
+    static void multiply(float* out, const float* a, const float* b) {
+        float tmp[16];
+        for (int i = 0; i < 4; i++)
+            for (int j = 0; j < 4; j++) {
+                tmp[j * 4 + i] = 0;
+                for (int k = 0; k < 4; k++)
+                    tmp[j * 4 + i] += a[k * 4 + i] * b[j * 4 + k];
+            }
+        memcpy(out, tmp, 16 * sizeof(float));
+    }
+
+    // Rotation around X axis (angle in radians)
+    static void rotateX(float* m, float angle) {
+        identity(m);
+        float c = cosf(angle), s = sinf(angle);
+        m[5] = c;  m[6] = s;
+        m[9] = -s; m[10] = c;
+    }
+
+    // Rotation around Y axis (angle in radians)
+    static void rotateY(float* m, float angle) {
+        identity(m);
+        float c = cosf(angle), s = sinf(angle);
+        m[0] = c;  m[2] = -s;
+        m[8] = s;  m[10] = c;
+    }
+
+    // Perspective projection matrix
+    static void perspective(float* m, float fovY, float aspect, float nearZ, float farZ) {
+        memset(m, 0, 16 * sizeof(float));
+        float f = 1.0f / tanf(fovY * 0.5f);
+        m[0]  = f / aspect;
+        m[5]  = f;
+        m[10] = (farZ + nearZ) / (nearZ - farZ);
+        m[11] = -1.0f;
+        m[14] = (2.0f * farZ * nearZ) / (nearZ - farZ);
+    }
+
+    // Look-at view matrix
+    static void lookAt(float* m, float eyeX, float eyeY, float eyeZ,
+                       float atX, float atY, float atZ,
+                       float upX, float upY, float upZ) {
+        // Forward = normalize(at - eye)
+        float fx = atX - eyeX, fy = atY - eyeY, fz = atZ - eyeZ;
+        float flen = sqrtf(fx*fx + fy*fy + fz*fz);
+        if (flen > 0) { fx /= flen; fy /= flen; fz /= flen; }
+        // Right = normalize(forward x up)
+        float rx = fy * upZ - fz * upY;
+        float ry = fz * upX - fx * upZ;
+        float rz = fx * upY - fy * upX;
+        float rlen = sqrtf(rx*rx + ry*ry + rz*rz);
+        if (rlen > 0) { rx /= rlen; ry /= rlen; rz /= rlen; }
+        // True up = right x forward
+        float ux = ry * fz - rz * fy;
+        float uy = rz * fx - rx * fz;
+        float uz = rx * fy - ry * fx;
+        // Column-major
+        m[0] = rx;  m[1] = ux;  m[2] = -fx; m[3] = 0;
+        m[4] = ry;  m[5] = uy;  m[6] = -fy; m[7] = 0;
+        m[8] = rz;  m[9] = uz;  m[10]= -fz; m[11]= 0;
+        m[12] = -(rx*eyeX + ry*eyeY + rz*eyeZ);
+        m[13] = -(ux*eyeX + uy*eyeY + uz*eyeZ);
+        m[14] =  (fx*eyeX + fy*eyeY + fz*eyeZ);
+        m[15] = 1.0f;
+    }
+
+    // Invert a 4x4 matrix (general case, for unprojection)
+    static bool invert(float* out, const float* m) {
+        float inv[16];
+        inv[0] = m[5]*m[10]*m[15] - m[5]*m[11]*m[14] - m[9]*m[6]*m[15]
+               + m[9]*m[7]*m[14] + m[13]*m[6]*m[11] - m[13]*m[7]*m[10];
+        inv[4] = -m[4]*m[10]*m[15] + m[4]*m[11]*m[14] + m[8]*m[6]*m[15]
+               - m[8]*m[7]*m[14] - m[12]*m[6]*m[11] + m[12]*m[7]*m[10];
+        inv[8] = m[4]*m[9]*m[15] - m[4]*m[11]*m[13] - m[8]*m[5]*m[15]
+               + m[8]*m[7]*m[13] + m[12]*m[5]*m[11] - m[12]*m[7]*m[9];
+        inv[12]= -m[4]*m[9]*m[14] + m[4]*m[10]*m[13] + m[8]*m[5]*m[14]
+               - m[8]*m[6]*m[13] - m[12]*m[5]*m[10] + m[12]*m[6]*m[9];
+        float det = m[0]*inv[0] + m[1]*inv[4] + m[2]*inv[8] + m[3]*inv[12];
+        if (fabsf(det) < 1e-12f) return false;
+        inv[1] = -m[1]*m[10]*m[15] + m[1]*m[11]*m[14] + m[9]*m[2]*m[15]
+               - m[9]*m[3]*m[14] - m[13]*m[2]*m[11] + m[13]*m[3]*m[10];
+        inv[5] = m[0]*m[10]*m[15] - m[0]*m[11]*m[14] - m[8]*m[2]*m[15]
+               + m[8]*m[3]*m[14] + m[12]*m[2]*m[11] - m[12]*m[3]*m[10];
+        inv[9] = -m[0]*m[9]*m[15] + m[0]*m[11]*m[13] + m[8]*m[1]*m[15]
+               - m[8]*m[3]*m[13] - m[12]*m[1]*m[11] + m[12]*m[3]*m[9];
+        inv[13]= m[0]*m[9]*m[14] - m[0]*m[10]*m[13] - m[8]*m[1]*m[14]
+               + m[8]*m[2]*m[13] + m[12]*m[1]*m[10] - m[12]*m[2]*m[9];
+        inv[2] = m[1]*m[6]*m[15] - m[1]*m[7]*m[14] - m[5]*m[2]*m[15]
+               + m[5]*m[3]*m[14] + m[13]*m[2]*m[7] - m[13]*m[3]*m[6];
+        inv[6] = -m[0]*m[6]*m[15] + m[0]*m[7]*m[14] + m[4]*m[2]*m[15]
+               - m[4]*m[3]*m[14] - m[12]*m[2]*m[7] + m[12]*m[3]*m[6];
+        inv[10]= m[0]*m[5]*m[15] - m[0]*m[7]*m[13] - m[4]*m[1]*m[15]
+               + m[4]*m[3]*m[13] + m[12]*m[1]*m[7] - m[12]*m[3]*m[5];
+        inv[14]= -m[0]*m[5]*m[14] + m[0]*m[6]*m[13] + m[4]*m[1]*m[14]
+               - m[4]*m[2]*m[13] - m[12]*m[1]*m[6] + m[12]*m[2]*m[5];
+        inv[3] = -m[1]*m[6]*m[11] + m[1]*m[7]*m[10] + m[5]*m[2]*m[11]
+               - m[5]*m[3]*m[10] - m[9]*m[2]*m[7] + m[9]*m[3]*m[6];
+        inv[7] = m[0]*m[6]*m[11] - m[0]*m[7]*m[10] - m[4]*m[2]*m[11]
+               + m[4]*m[3]*m[10] + m[8]*m[2]*m[7] - m[8]*m[3]*m[6];
+        inv[11]= -m[0]*m[5]*m[11] + m[0]*m[7]*m[9] + m[4]*m[1]*m[11]
+               - m[4]*m[3]*m[9] - m[8]*m[1]*m[7] + m[8]*m[3]*m[5];
+        inv[15]= m[0]*m[5]*m[10] - m[0]*m[6]*m[9] - m[4]*m[1]*m[10]
+               + m[4]*m[2]*m[9] + m[8]*m[1]*m[6] - m[8]*m[2]*m[5];
+        float invDet = 1.0f / det;
+        for (int i = 0; i < 16; i++) out[i] = inv[i] * invDet;
+        return true;
+    }
+}
+
 // ---- Lifecycle ----
 
 GLRenderer::GLRenderer()
@@ -196,6 +371,9 @@ void GLRenderer::initShaders() {
     }
     if (!m_shader3D.compile(VERT_3D_SRC, FRAG_3D_SRC)) {
         fprintf(stderr, "[GLRenderer] FATAL: 3D shader compile failed\n");
+    }
+    if (!m_shaderTerrain.compile(VERT_TERRAIN_SRC, FRAG_TERRAIN_SRC)) {
+        fprintf(stderr, "[GLRenderer] FATAL: terrain shader compile failed\n");
     }
 }
 
@@ -417,11 +595,17 @@ void GLRenderer::autoFitCamera(const MapSnapshot& snapshot) {
 }
 
 void GLRenderer::centerOnTile(int tileX, int tileY, int mapHeight) {
-    int flippedRow = mapHeight - 1 - tileY;
-    float worldX = (tileX + 0.5f) * TILE_SIZE;
-    float worldY = (flippedRow + 0.5f) * TILE_SIZE;
-    m_camera.offsetX = worldX - (m_windowW / m_camera.zoom) * 0.5f;
-    m_camera.offsetY = worldY - (m_windowH / m_camera.zoom) * 0.5f;
+    if (m_use3DTerrain) {
+        // 3D camera: set focal point to tile center in world coords
+        m_cam3D.focalX = tileX + 0.5f;
+        m_cam3D.focalZ = (mapHeight - 1 - tileY) + 0.5f;
+    } else {
+        int flippedRow = mapHeight - 1 - tileY;
+        float worldX = (tileX + 0.5f) * TILE_SIZE;
+        float worldY = (flippedRow + 0.5f) * TILE_SIZE;
+        m_camera.offsetX = worldX - (m_windowW / m_camera.zoom) * 0.5f;
+        m_camera.offsetY = worldY - (m_windowH / m_camera.zoom) * 0.5f;
+    }
 }
 
 void GLRenderer::tileTopLeft(int col, int row, int mapHeight, float& tx, float& ty) const {
@@ -432,6 +616,60 @@ void GLRenderer::tileTopLeft(int col, int row, int mapHeight, float& tx, float& 
 
 bool GLRenderer::screenToTile(int screenX, int screenY, const MapSnapshot& snapshot,
                                int& tileX, int& tileY) {
+    if (m_use3DTerrain) {
+        // Unproject screen point through inverse VP, intersect with Y=0 plane
+        float invVP[16];
+        if (!mat4::invert(invVP, m_vpMatrix)) return false;
+
+        // NDC coordinates: map screen [0,W] x [0,H] to [-1,1]
+        float ndcX = (2.0f * screenX / m_windowW) - 1.0f;
+        float ndcY = 1.0f - (2.0f * screenY / m_windowH); // flip Y
+
+        // Near point in clip space
+        float nearPt[4] = { ndcX, ndcY, -1.0f, 1.0f };
+        float farPt[4]  = { ndcX, ndcY,  1.0f, 1.0f };
+
+        // Transform to world space
+        auto transformPt = [&](const float* pt, float* out) {
+            for (int i = 0; i < 4; i++)
+                out[i] = invVP[i]*pt[0] + invVP[4+i]*pt[1] + invVP[8+i]*pt[2] + invVP[12+i]*pt[3];
+            if (fabsf(out[3]) > 1e-12f) {
+                out[0] /= out[3]; out[1] /= out[3]; out[2] /= out[3];
+            }
+        };
+
+        float wNear[4], wFar[4];
+        transformPt(nearPt, wNear);
+        transformPt(farPt, wFar);
+
+        // Ray direction
+        float dx = wFar[0] - wNear[0];
+        float dy = wFar[1] - wNear[1];
+        float dz = wFar[2] - wNear[2];
+
+        // Intersect with Y=0 plane
+        if (fabsf(dy) < 1e-8f) return false; // ray parallel to ground
+        float t = -wNear[1] / dy;
+        if (t < 0) return false; // behind camera
+
+        float hitX = wNear[0] + t * dx;
+        float hitZ = wNear[2] + t * dz;
+
+        int col = (int)floorf(hitX);
+        int flippedRow = (int)floorf(hitZ);
+
+        if (snapshot.wrapX) col = ((col % snapshot.width) + snapshot.width) % snapshot.width;
+        if (snapshot.wrapY) flippedRow = ((flippedRow % snapshot.height) + snapshot.height) % snapshot.height;
+
+        int row = snapshot.height - 1 - flippedRow;
+        if (col < 0 || col >= snapshot.width || row < 0 || row >= snapshot.height)
+            return false;
+        tileX = col;
+        tileY = row;
+        return true;
+    }
+
+    // Legacy 2D path
     float worldX = screenX / m_camera.zoom + m_camera.offsetX;
     float worldY = screenY / m_camera.zoom + m_camera.offsetY;
     int col = (int)floorf(worldX / TILE_SIZE);
@@ -471,11 +709,22 @@ void GLRenderer::draw(MapSnapshot& snapshot) {
     dt = std::min(dt, 0.1f);
     m_lastFrameTime = now;
 
-    float panDelta = m_panSpeed * dt / m_camera.zoom;
-    if (m_keyUp)    m_camera.offsetY -= panDelta;
-    if (m_keyDown)  m_camera.offsetY += panDelta;
-    if (m_keyLeft)  m_camera.offsetX -= panDelta;
-    if (m_keyRight) m_camera.offsetX += panDelta;
+    if (m_use3DTerrain) {
+        // 3D camera: pan focal point based on azimuth direction
+        float panSpeed3D = m_cam3D.distance * 0.5f * dt;
+        float cosAz = cosf(m_cam3D.azimuth);
+        float sinAz = sinf(m_cam3D.azimuth);
+        if (m_keyUp)    { m_cam3D.focalX -= sinAz * panSpeed3D; m_cam3D.focalZ -= cosAz * panSpeed3D; }
+        if (m_keyDown)  { m_cam3D.focalX += sinAz * panSpeed3D; m_cam3D.focalZ += cosAz * panSpeed3D; }
+        if (m_keyLeft)  { m_cam3D.focalX -= cosAz * panSpeed3D; m_cam3D.focalZ += sinAz * panSpeed3D; }
+        if (m_keyRight) { m_cam3D.focalX += cosAz * panSpeed3D; m_cam3D.focalZ -= sinAz * panSpeed3D; }
+    } else {
+        float panDelta = m_panSpeed * dt / m_camera.zoom;
+        if (m_keyUp)    m_camera.offsetY -= panDelta;
+        if (m_keyDown)  m_camera.offsetY += panDelta;
+        if (m_keyLeft)  m_camera.offsetX -= panDelta;
+        if (m_keyRight) m_camera.offsetX += panDelta;
+    }
 
     // Periodically clear text cache to prevent memory growth
     m_textCacheFrame++;
@@ -511,7 +760,11 @@ void GLRenderer::draw(MapSnapshot& snapshot) {
         }
 
         if (!m_cameraInitialized) {
-            autoFitCamera(snapshot);
+            if (m_use3DTerrain) {
+                autoFitCamera3D(snapshot);
+            } else {
+                autoFitCamera(snapshot);
+            }
             m_cameraInitialized = true;
         }
 
@@ -528,7 +781,11 @@ void GLRenderer::draw(MapSnapshot& snapshot) {
         }
 
         g_renderStep = 1;
-        drawTerrain(snapshot);
+        if (m_use3DTerrain) {
+            drawTerrain3D(snapshot);
+        } else {
+            drawTerrain(snapshot);
+        }
 
         if (!m_disable3D) {
             g_renderStep = 2;
@@ -576,74 +833,6 @@ void GLRenderer::draw(MapSnapshot& snapshot) {
 // ---- 3D Model rendering ----
 
 #include "Mesh.h"
-#include <cmath>
-
-// Simple 4x4 matrix helpers for 3D rendering (column-major for OpenGL)
-namespace mat4 {
-    static void identity(float* m) {
-        memset(m, 0, 16 * sizeof(float));
-        m[0] = m[5] = m[10] = m[15] = 1.0f;
-    }
-
-    static void ortho(float* m, float left, float right, float bottom, float top, float near, float far) {
-        memset(m, 0, 16 * sizeof(float));
-        m[0]  = 2.0f / (right - left);
-        m[5]  = 2.0f / (top - bottom);
-        m[10] = -2.0f / (far - near);
-        m[12] = -(right + left) / (right - left);
-        m[13] = -(top + bottom) / (top - bottom);
-        m[14] = -(far + near) / (far - near);
-        m[15] = 1.0f;
-    }
-
-    static void translate(float* m, float tx, float ty, float tz) {
-        identity(m);
-        m[12] = tx; m[13] = ty; m[14] = tz;
-    }
-
-    static void scale(float* m, float sx, float sy, float sz) {
-        memset(m, 0, 16 * sizeof(float));
-        m[0] = sx; m[5] = sy; m[10] = sz; m[15] = 1.0f;
-    }
-
-    static void multiply(float* out, const float* a, const float* b) {
-        float tmp[16];
-        for (int i = 0; i < 4; i++)
-            for (int j = 0; j < 4; j++) {
-                tmp[j * 4 + i] = 0;
-                for (int k = 0; k < 4; k++)
-                    tmp[j * 4 + i] += a[k * 4 + i] * b[j * 4 + k];
-            }
-        memcpy(out, tmp, 16 * sizeof(float));
-    }
-
-    // Rotation around X axis (angle in radians)
-    static void rotateX(float* m, float angle) {
-        identity(m);
-        float c = cosf(angle), s = sinf(angle);
-        m[5] = c;  m[6] = s;
-        m[9] = -s; m[10] = c;
-    }
-
-    // Rotation around Y axis (angle in radians)
-    static void rotateY(float* m, float angle) {
-        identity(m);
-        float c = cosf(angle), s = sinf(angle);
-        m[0] = c;  m[2] = -s;
-        m[8] = s;  m[10] = c;
-    }
-
-    // Perspective projection matrix
-    static void perspective(float* m, float fovY, float aspect, float nearZ, float farZ) {
-        memset(m, 0, 16 * sizeof(float));
-        float f = 1.0f / tanf(fovY * 0.5f);
-        m[0]  = f / aspect;
-        m[5]  = f;
-        m[10] = (farZ + nearZ) / (nearZ - farZ);
-        m[11] = -1.0f;
-        m[14] = (2.0f * farZ * nearZ) / (nearZ - farZ);
-    }
-}
 
 void GLRenderer::draw3DModels(const MapSnapshot& snapshot) {
     // TODO: 3D model rendering disabled until lighting/texturing is improved
@@ -796,7 +985,81 @@ void GLRenderer::draw3DModels(const MapSnapshot& snapshot) {
     glDisable(GL_DEPTH_TEST);
 }
 
-// ---- Terrain drawing (map tiles) ----
+// ---- 3D Camera helpers ----
+
+void GLRenderer::buildCamera3DMatrices(float* view, float* proj) const {
+    // Eye position: orbit around focal point using spherical coordinates
+    float cosEl = cosf(m_cam3D.elevation);
+    float sinEl = sinf(m_cam3D.elevation);
+    float cosAz = cosf(m_cam3D.azimuth);
+    float sinAz = sinf(m_cam3D.azimuth);
+
+    float eyeX = m_cam3D.focalX + m_cam3D.distance * sinAz * cosEl;
+    float eyeY = m_cam3D.distance * sinEl;
+    float eyeZ = m_cam3D.focalZ + m_cam3D.distance * cosAz * cosEl;
+
+    mat4::lookAt(view, eyeX, eyeY, eyeZ,
+                 m_cam3D.focalX, 0.0f, m_cam3D.focalZ,
+                 0.0f, 1.0f, 0.0f);
+
+    float aspect = (m_windowW > 0 && m_windowH > 0)
+                   ? (float)m_windowW / (float)m_windowH : 1.0f;
+    mat4::perspective(proj, m_cam3D.fovY, aspect, m_cam3D.nearZ, m_cam3D.farZ);
+}
+
+void GLRenderer::autoFitCamera3D(const MapSnapshot& snapshot) {
+    // Center focal point on the map
+    m_cam3D.focalX = snapshot.width * 0.5f;
+    m_cam3D.focalZ = snapshot.height * 0.5f;
+    // Distance so the whole map is roughly visible
+    float mapDiag = sqrtf((float)(snapshot.width * snapshot.width + snapshot.height * snapshot.height));
+    m_cam3D.distance = mapDiag * 0.7f;
+    m_cam3D.elevation = 0.8f; // ~45 degree angle
+    m_cam3D.azimuth = 0.0f;   // looking south
+}
+
+// ---- 3D Terrain rendering ----
+
+void GLRenderer::drawTerrain3D(const MapSnapshot& snapshot) {
+    // Build terrain mesh on first frame (or if map changed)
+    if (!m_terrainMeshBuilt || m_terrainMesh.mapWidth() != snapshot.width ||
+        m_terrainMesh.mapHeight() != snapshot.height) {
+        m_terrainMesh.rebuild(snapshot);
+        m_terrainMeshBuilt = true;
+    }
+
+    if (m_terrainMesh.empty()) return;
+
+    // Build view and projection matrices
+    float view[16], proj[16], mvp[16];
+    buildCamera3DMatrices(view, proj);
+    mat4::multiply(mvp, proj, view);
+
+    // Cache VP for screenToTile unprojection
+    memcpy(m_vpMatrix, mvp, sizeof(m_vpMatrix));
+
+    // Set up terrain shader
+    m_shaderTerrain.use();
+    glUniformMatrix4fv(glGetUniformLocation(m_shaderTerrain.id(), "uMVP"), 1, GL_FALSE, mvp);
+
+    // Lighting: sun from upper-right
+    float lightDir[3] = { 0.4f, 0.8f, -0.4f };
+    float len = sqrtf(lightDir[0]*lightDir[0] + lightDir[1]*lightDir[1] + lightDir[2]*lightDir[2]);
+    lightDir[0] /= len; lightDir[1] /= len; lightDir[2] /= len;
+    glUniform3f(glGetUniformLocation(m_shaderTerrain.id(), "uLightDir"),
+                lightDir[0], lightDir[1], lightDir[2]);
+    glUniform3f(glGetUniformLocation(m_shaderTerrain.id(), "uAmbient"), 0.35f, 0.35f, 0.35f);
+
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+    glClear(GL_DEPTH_BUFFER_BIT);
+
+    m_terrainMesh.draw();
+
+    glDisable(GL_DEPTH_TEST);
+}
+
+// ---- Legacy 2D Terrain drawing (map tiles) ----
 
 void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
     float screenTileSize = TILE_SIZE * m_camera.zoom;
@@ -814,7 +1077,7 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
     if (!snapshot.wrapX) { colStart = std::max(0, colStart); colEnd = std::min(snapshot.width - 1, colEnd); }
     if (!snapshot.wrapY) { rowStart = std::max(0, rowStart); rowEnd = std::min(snapshot.height - 1, rowEnd); }
 
-    // --- Pass 1: Terrain textures (one textured quad per tile) ---
+    // --- Pass 1: Terrain textures (Atlas-based multi-layer blending) ---
     bool haveBlend = m_assets && m_assets->hasBlendTextures();
     GLuint curBoundTex = 0;
 
@@ -822,182 +1085,37 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
 
     if (haveBlend) {
         m_shader.setInt("uUseTexture", 1);
-    } else {
-        glBindTexture(GL_TEXTURE_2D, m_whiteTexture);
-        m_shader.setInt("uUseTexture", 0);
-    }
-
-    for (int vr = rowStart; vr <= rowEnd; vr++) {
-        for (int vc = colStart; vc <= colEnd; vc++) {
-            int x = snapshot.wrapX ? ((vc % snapshot.width) + snapshot.width) % snapshot.width : vc;
-            int fr = snapshot.wrapY ? ((vr % snapshot.height) + snapshot.height) % snapshot.height : vr;
-            int y = snapshot.height - 1 - fr;
-            if (x < 0 || x >= snapshot.width || y < 0 || y >= snapshot.height) continue;
-
-            const PlotData& plot = snapshot.getPlot(x, y);
-
-            // Fog of war: skip unseen tiles entirely
-            if (plot.visibility == 0) continue;
-
-            float worldTX = vc * TILE_SIZE;
-            float worldTY = vr * TILE_SIZE;
-            float screenTX = (worldTX - m_camera.offsetX) * m_camera.zoom;
-            float screenTY = (worldTY - m_camera.offsetY) * m_camera.zoom;
-
-            if (screenTX + screenTileSize < 0 || screenTX > m_windowW ||
-                screenTY + screenTileSize < 0 || screenTY > m_windowH) continue;
-
-            // Fog of war: dim revealed-but-not-currently-visible tiles
-            float fogBright = (plot.visibility == 1) ? 0.45f : 1.0f;
-
-            bool isWater = (plot.terrainType == 5 || plot.terrainType == 6); // COAST=5, OCEAN=6
-
-            if (haveBlend) {
-                if (isWater) {
-                    // Water tiles: prefer real water.dds, fallback to procedural
-                    GLuint waterTex = m_assets->getWaterSurfaceGL();
-                    if (!waterTex) {
-                        waterTex = (plot.terrainType == 6)
-                            ? m_assets->getOceanWaterGL()
-                            : m_assets->getCoastWaterGL();
-                    }
-                    if (waterTex) {
-                        if (waterTex != curBoundTex) {
-                            flushBatch();
-                            glBindTexture(GL_TEXTURE_2D, waterTex);
-                            m_shader.setInt("uUseTexture", 1);
-                            curBoundTex = waterTex;
-                        }
-                        // Scrolling UV for wave animation
-                        float timeS = SDL_GetTicks() * 0.00004f;
-                        float u0 = (float)x * 0.5f + timeS;
-                        float v0 = (float)y * 0.5f + timeS * 0.7f;
-                        float u1 = u0 + 0.5f;
-                        float v1 = v0 + 0.5f;
-                        // Ocean is slightly darker/bluer than coast
-                        float wR = (plot.terrainType == 6) ? 0.6f : 0.75f;
-                        float wG = (plot.terrainType == 6) ? 0.65f : 0.85f;
-                        float wB = (plot.terrainType == 6) ? 0.85f : 0.95f;
-                        pushQuad(screenTX, screenTY, screenTileSize, screenTileSize,
-                                 wR * fogBright, wG * fogBright, wB * fogBright, 1.0f,
-                                 waterTex, u0, v0, u1, v1);
-                    } else {
-                        // Fallback: solid water color
-                        float r, g, b;
-                        if (plot.terrainType == 6) { r=0.05f; g=0.14f; b=0.35f; }
-                        else { r=0.10f; g=0.30f; b=0.50f; }
-                        if (curBoundTex != m_whiteTexture) {
-                            flushBatch();
-                            glBindTexture(GL_TEXTURE_2D, m_whiteTexture);
-                            m_shader.setInt("uUseTexture", 0);
-                            curBoundTex = m_whiteTexture;
-                        }
-                        pushQuad(screenTX, screenTY, screenTileSize, screenTileSize,
-                                 r*fogBright, g*fogBright, b*fogBright, 1.0f);
-                    }
-                } else {
-                    // Land tiles: use blend textures with world-space UVs
-                    int blendKey = plot.terrainType;
-                    if (plot.plotType == 0) blendKey = -1; // Peak
-                    else if (plot.plotType == 1) blendKey = -2; // Hill
-
-                    GLuint tex = m_assets->getTerrainBlendGL(blendKey);
-                    if (!tex) tex = m_assets->getTerrainBlendGL(plot.terrainType);
-                    if (!tex) {
-                        if (curBoundTex != m_whiteTexture) {
-                            flushBatch();
-                            glBindTexture(GL_TEXTURE_2D, m_whiteTexture);
-                            m_shader.setInt("uUseTexture", 0);
-                            curBoundTex = m_whiteTexture;
-                        }
-                        TerrainColor tc = getTerrainColor(plot.terrainType, plot.plotType);
-                        pushQuad(screenTX, screenTY, screenTileSize, screenTileSize,
-                                 tc.r / 255.0f * fogBright, tc.g / 255.0f * fogBright,
-                                 tc.b / 255.0f * fogBright, 1.0f);
-                    } else {
-                        if (tex != curBoundTex) {
-                            flushBatch();
-                            glBindTexture(GL_TEXTURE_2D, tex);
-                            m_shader.setInt("uUseTexture", 1);
-                            curBoundTex = tex;
-                        }
-                        // Continuous world-space UVs — seamless tiling across tiles
-                        // Texture repeats every 4 tiles for good detail/variety balance
-                        float tilesPerTex = 4.0f;
-                        float u0 = (float)x / tilesPerTex;
-                        float v0 = (float)y / tilesPerTex;
-                        float u1 = u0 + 1.0f / tilesPerTex;
-                        float v1 = v0 + 1.0f / tilesPerTex;
-                        pushQuad(screenTX, screenTY, screenTileSize, screenTileSize,
-                                 fogBright, fogBright, fogBright, 1.0f, tex, u0, v0, u1, v1);
-                    }
-                }
-            } else {
-                // Flat color fallback (no blend textures)
-                TerrainColor tc = getTerrainColor(plot.terrainType, plot.plotType);
-                pushQuad(screenTX, screenTY, screenTileSize, screenTileSize,
-                         tc.r / 255.0f * fogBright, tc.g / 255.0f * fogBright,
-                         tc.b / 255.0f * fogBright, 1.0f);
-            }
-        }
-    }
-    flushBatch();
-
-    // --- Pass 1a: Terrain edge blending (corner-weighted alpha) ---
-    // For each tile, higher-LayerOrder neighboring terrains bleed in with
-    // per-corner alpha based on how many of 3 corner-adjacent neighbors
-    // share that terrain type. Creates smooth gradient transitions.
-    if (haveBlend) {
-        // Effective blend key: terrain type, or -1/-2 for peak/hill
+        
         auto getTerrainKey = [](const PlotData& p) -> int {
-            if (p.plotType == 0) return -1; // Peak
-            if (p.plotType == 1) return -2; // Hill
+            if (p.plotType == 0) return -1;
+            if (p.plotType == 1) return -2;
             return p.terrainType;
         };
 
-        // LayerOrder from CIV4ArtDefines_Terrain.xml
         auto layerForKey = [](int key) -> int {
             switch (key) {
-                case -1: return 80; // Peak
-                case -2: return 79; // Hill
-                case 0: return 4;   // Grass
-                case 1: return 3;   // Plains
-                case 2: return 2;   // Desert
-                case 3: return 1;   // Tundra
-                case 4: return 5;   // Snow
-                case 5: return 50;  // Coast
-                case 6: return 60;  // Ocean
+                case -1: return 80;
+                case -2: return 79;
+                case 0: return 4;
+                case 1: return 3;
+                case 2: return 2;
+                case 3: return 1;
+                case 4: return 5;
+                case 5: return 50;
+                case 6: return 60;
                 default: return 0;
             }
         };
 
-        // Safely get a neighbor plot (handles wrapping and out-of-bounds)
         auto getNeighbor = [&](int px, int py) -> const PlotData* {
             if (snapshot.wrapX) px = ((px % snapshot.width) + snapshot.width) % snapshot.width;
             if (snapshot.wrapY) py = ((py % snapshot.height) + snapshot.height) % snapshot.height;
             if (px < 0 || px >= snapshot.width || py < 0 || py >= snapshot.height) return nullptr;
             return &snapshot.getPlot(px, py);
         };
-
-        curBoundTex = 0;
-        beginBatch();
-        m_shader.setInt("uUseTexture", 1);
-
-        // 8 neighbor directions: N, NE, E, SE, S, SW, W, NW (game coords)
-        static const int ndx[8] = {0, 1, 1, 1, 0, -1, -1, -1};
-        static const int ndy[8] = {1, 1, 0, -1, -1, -1, 0, 1};
-
-        // Corner→neighbor mapping (screen: TL=NW, TR=NE, BL=SW, BR=SE)
-        // Each corner touches 3 neighbors:
-        //   TL(NW): N=0, NW=7, W=6
-        //   TR(NE): N=0, NE=1, E=2
-        //   BL(SW): S=4, SW=5, W=6
-        //   BR(SE): S=4, SE=3, E=2
-        static const int cornerNbr[4][3] = {
-            {0, 7, 6}, // TL: N, NW, W
-            {0, 1, 2}, // TR: N, NE, E
-            {4, 5, 6}, // BL: S, SW, W
-            {4, 3, 2}, // BR: S, SE, E
+        
+        static const int blendMaskToAtlasSlot[16] = {
+            0, 8, 1, 2, 6, 13, 10, 3, 5, 9, 7, 4, 12, 11, 14, 15
         };
 
         for (int vr = rowStart; vr <= rowEnd; vr++) {
@@ -1010,48 +1128,43 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                 const PlotData& plot = snapshot.getPlot(x, y);
                 if (plot.visibility == 0) continue;
 
-                int myKey = getTerrainKey(plot);
-                int myOrder = layerForKey(myKey);
-
                 float worldTX = vc * TILE_SIZE;
                 float worldTY = vr * TILE_SIZE;
                 float screenTX = (worldTX - m_camera.offsetX) * m_camera.zoom;
                 float screenTY = (worldTY - m_camera.offsetY) * m_camera.zoom;
+
                 if (screenTX + screenTileSize < 0 || screenTX > m_windowW ||
                     screenTY + screenTileSize < 0 || screenTY > m_windowH) continue;
 
                 float fogBright = (plot.visibility == 1) ? 0.45f : 1.0f;
-
-                // Get 8 neighbors' terrain keys and layer orders
-                int nKeys[8], nOrders[8];
-                for (int i = 0; i < 8; i++) {
-                    const PlotData* np = getNeighbor(x + ndx[i], y + ndy[i]);
-                    if (np && np->visibility > 0) {
-                        nKeys[i] = getTerrainKey(*np);
-                        nOrders[i] = layerForKey(nKeys[i]);
-                    } else {
-                        nKeys[i] = myKey;
-                        nOrders[i] = myOrder;
-                    }
-                }
-
-                // Collect unique higher-layer terrain types
+                float landBright = fogBright * 1.15f;
+                
+                int myKey = getTerrainKey(plot);
+                const PlotData* pN = getNeighbor(x, y + 1);
+                const PlotData* pE = getNeighbor(x + 1, y);
+                const PlotData* pS = getNeighbor(x, y - 1);
+                const PlotData* pW = getNeighbor(x - 1, y);
+                
+                int keys[5];
+                keys[0] = myKey;
+                keys[1] = (pN && pN->visibility > 0) ? getTerrainKey(*pN) : myKey;
+                keys[2] = (pE && pE->visibility > 0) ? getTerrainKey(*pE) : myKey;
+                keys[3] = (pS && pS->visibility > 0) ? getTerrainKey(*pS) : myKey;
+                keys[4] = (pW && pW->visibility > 0) ? getTerrainKey(*pW) : myKey;
+                
                 struct BlendEntry { int key; int order; };
-                BlendEntry blends[8];
+                BlendEntry blends[5];
                 int numBlends = 0;
-                for (int i = 0; i < 8; i++) {
-                    if (nOrders[i] > myOrder) {
-                        bool found = false;
-                        for (int j = 0; j < numBlends; j++) {
-                            if (blends[j].key == nKeys[i]) { found = true; break; }
-                        }
-                        if (!found && numBlends < 8)
-                            blends[numBlends++] = {nKeys[i], nOrders[i]};
+                for (int i = 0; i < 5; i++) {
+                    bool found = false;
+                    for (int j = 0; j < numBlends; j++) {
+                        if (blends[j].key == keys[i]) { found = true; break; }
+                    }
+                    if (!found) {
+                        blends[numBlends++] = {keys[i], layerForKey(keys[i])};
                     }
                 }
-                if (numBlends == 0) continue;
-
-                // Sort by layer order ascending (lowest drawn first, highest on top)
+                
                 for (int i = 1; i < numBlends; i++) {
                     auto tmp = blends[i];
                     int j = i - 1;
@@ -1060,65 +1173,103 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                     }
                     blends[j + 1] = tmp;
                 }
-
-                // Draw blend overlay for each higher-layer terrain
+                
                 for (int b = 0; b < numBlends; b++) {
                     int bKey = blends[b].key;
-
-                    // Compute corner alphas: count how many of 3 corner-neighbors have this terrain
-                    float corners[4];
-                    for (int c = 0; c < 4; c++) {
-                        int count = 0;
-                        for (int n = 0; n < 3; n++) {
-                            if (nKeys[cornerNbr[c][n]] == bKey) count++;
-                        }
-                        corners[c] = count / 3.0f;
-                    }
-
-                    if (corners[0] < 0.01f && corners[1] < 0.01f &&
-                        corners[2] < 0.01f && corners[3] < 0.01f) continue;
-
-                    // Get texture for the blending terrain
                     bool isWater = (bKey == 5 || bKey == 6);
-                    GLuint bTex;
-                    if (isWater) {
-                        bTex = (bKey == 6) ? m_assets->getOceanWaterGL() : m_assets->getCoastWaterGL();
-                    } else {
-                        bTex = m_assets->getTerrainBlendGL(bKey);
-                    }
-                    if (!bTex) continue;
-
-                    if (bTex != curBoundTex) {
-                        flushBatch();
-                        glBindTexture(GL_TEXTURE_2D, bTex);
-                        curBoundTex = bTex;
-                    }
-
-                    // UVs: world-space tiling for seamless continuity
+                    
+                    int mask = 0;
+                    if (keys[3] == bKey) mask |= 1; // S
+                    if (keys[4] == bKey) mask |= 2; // W
+                    if (keys[1] == bKey) mask |= 4; // N
+                    if (keys[2] == bKey) mask |= 8; // E
+                    
+                    if (b == 0) mask = 15;
+                    
+                    GLuint tex = 0;
                     float u0, v0, u1, v1;
-                    if (isWater) {
-                        float timeS = SDL_GetTicks() * 0.00004f;
-                        u0 = (float)x * 0.5f + timeS;
-                        v0 = (float)y * 0.5f + timeS * 0.7f;
-                        u1 = u0 + 0.5f;
-                        v1 = v0 + 0.5f;
+                    
+                    if (isWater && mask == 15) {
+                        tex = m_assets->getWaterSurfaceGL();
+                        if (!tex) tex = (bKey == 6) ? m_assets->getOceanWaterGL() : m_assets->getCoastWaterGL();
+                        if (tex) {
+                            float timeS = SDL_GetTicks() * 0.00004f;
+                            u0 = (float)x * 0.5f + timeS;
+                            v0 = (float)y * 0.5f + timeS * 0.7f;
+                            u1 = u0 + 0.5f;
+                            v1 = v0 + 0.5f;
+                        }
                     } else {
-                        float tilesPerTex = 4.0f;
-                        u0 = (float)x / tilesPerTex;
-                        v0 = (float)y / tilesPerTex;
-                        u1 = u0 + 1.0f / tilesPerTex;
-                        v1 = v0 + 1.0f / tilesPerTex;
+                        tex = m_assets->getTerrainBlendGL(bKey);
+                        if (!tex && isWater) tex = (bKey == 6) ? m_assets->getOceanWaterGL() : m_assets->getCoastWaterGL();
+                        
+                        if (tex) {
+                            int slot = blendMaskToAtlasSlot[mask];
+                            if (mask == 15) {
+                                int hash = ((x * 73) ^ (y * 37)) % 17;
+                                slot = 15 + hash;
+                            }
+                            
+                            int col = slot % 4;
+                            int row = slot / 4;
+                            u0 = col * 0.25f;
+                            v0 = row * 0.125f;
+                            u1 = u0 + 0.25f;
+                            v1 = v0 + 0.125f;
+                        }
                     }
-
-                    pushQuadAlphaGrad(screenTX, screenTY, screenTileSize, screenTileSize,
-                                      fogBright, fogBright, fogBright,
-                                      corners[0], corners[1], corners[2], corners[3],
-                                      bTex, u0, v0, u1, v1);
+                    
+                    if (!tex) continue;
+                    
+                    if (tex != curBoundTex) {
+                        flushBatch();
+                        glBindTexture(GL_TEXTURE_2D, tex);
+                        curBoundTex = tex;
+                    }
+                    
+                    float tR = landBright, tG = landBright, tB = landBright;
+                    if (isWater && mask == 15) {
+                        tR = ((bKey == 6) ? 0.75f : 0.85f) * fogBright;
+                        tG = ((bKey == 6) ? 0.80f : 0.92f) * fogBright;
+                        tB = ((bKey == 6) ? 0.95f : 1.00f) * fogBright;
+                    }
+                    
+                    pushQuad(screenTX, screenTY, screenTileSize, screenTileSize,
+                             tR, tG, tB, 1.0f, tex, u0, v0, u1, v1);
                 }
             }
         }
-        flushBatch();
+    } else {
+        glBindTexture(GL_TEXTURE_2D, m_whiteTexture);
+        m_shader.setInt("uUseTexture", 0);
+        curBoundTex = m_whiteTexture;
+        for (int vr = rowStart; vr <= rowEnd; vr++) {
+            for (int vc = colStart; vc <= colEnd; vc++) {
+                int x = snapshot.wrapX ? ((vc % snapshot.width) + snapshot.width) % snapshot.width : vc;
+                int fr = snapshot.wrapY ? ((vr % snapshot.height) + snapshot.height) % snapshot.height : vr;
+                int y = snapshot.height - 1 - fr;
+                if (x < 0 || x >= snapshot.width || y < 0 || y >= snapshot.height) continue;
+
+                const PlotData& plot = snapshot.getPlot(x, y);
+                if (plot.visibility == 0) continue;
+
+                float worldTX = vc * TILE_SIZE;
+                float worldTY = vr * TILE_SIZE;
+                float screenTX = (worldTX - m_camera.offsetX) * m_camera.zoom;
+                float screenTY = (worldTY - m_camera.offsetY) * m_camera.zoom;
+
+                if (screenTX + screenTileSize < 0 || screenTX > m_windowW ||
+                    screenTY + screenTileSize < 0 || screenTY > m_windowH) continue;
+
+                float fogBright = (plot.visibility == 1) ? 0.45f : 1.0f;
+                TerrainColor tc = getTerrainColor(plot.terrainType, plot.plotType);
+                pushQuad(screenTX, screenTY, screenTileSize, screenTileSize,
+                         tc.r / 255.0f * fogBright, tc.g / 255.0f * fogBright,
+                         tc.b / 255.0f * fogBright, 1.0f);
+            }
+        }
     }
+    flushBatch();
 
     // --- Pass 1b: Feature texture overlays ---
     // Uses REAL art assets from FPK — NEVER button icons.
@@ -1170,19 +1321,24 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                     case 4: // Forest: trees_1024.dds tree canopy atlas
                         alpha = 0.85f;
                         tintR = 0.55f; tintG = 0.75f; tintB = 0.40f; // green forest tint
-                        // Use a sub-region of the tree atlas, varied per-tile
-                        { int cell = ((x * 7 + y * 13) & 3); // 0-3 variety
-                          float cx = (cell % 2) * 0.5f;
-                          float cy = (cell / 2) * 0.5f;
-                          u0 = cx; v0 = cy; u1 = cx + 0.5f; v1 = cy + 0.5f; }
+                        {
+                          // 8x8 grid. Use columns 0-3 for variety, rows 0-7 for density/shape
+                          int col = (x * 7 + y * 13) % 4;
+                          int row = (x * 11 + y * 17) % 8;
+                          u0 = col * 0.125f; v0 = row * 0.125f;
+                          u1 = u0 + 0.125f; v1 = v0 + 0.125f;
+                        }
                         break;
                     case 1: // Jungle: trees_1024.dds with darker tropical tint
                         alpha = 0.90f;
                         tintR = 0.35f; tintG = 0.60f; tintB = 0.25f; // darker jungle tint
-                        { int cell = ((x * 11 + y * 7) & 3);
-                          float cx = (cell % 2) * 0.5f;
-                          float cy = (cell / 2) * 0.5f;
-                          u0 = cx; v0 = cy; u1 = cx + 0.5f; v1 = cy + 0.5f; }
+                        {
+                          // Jungle often uses columns 4-7
+                          int col = 4 + ((x * 7 + y * 13) % 4);
+                          int row = (x * 11 + y * 17) % 8;
+                          u0 = col * 0.125f; v0 = row * 0.125f;
+                          u1 = u0 + 0.125f; v1 = v0 + 0.125f;
+                        }
                         break;
                     case 2: // Oasis: small 128x128 water texture, stretch to tile
                         alpha = 0.80f;
@@ -1291,25 +1447,25 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                     if (screenTX + screenTileSize < 0 || screenTX > m_windowW ||
                         screenTY + screenTileSize < 0 || screenTY > m_windowH) continue;
 
-                    float riverThk = std::max(3.0f, screenTileSize * 0.15f);
+                    float riverThk = std::max(4.0f, screenTileSize * 0.25f);
 
                     if (plot.isNOfRiver) {
                         // Horizontal river strip along north edge
-                        float ru0 = (float)x * 0.5f + timeS;
-                        float rv0 = (float)y * 0.3f;
-                        float ru1 = ru0 + 0.5f;
-                        float rv1 = rv0 + 0.15f;
+                        float ru0 = (float)x + timeS;
+                        float rv0 = 0.0f;
+                        float ru1 = ru0 + 1.0f;
+                        float rv1 = 1.0f;
                         pushQuad(screenTX, screenTY - riverThk * 0.5f, screenTileSize, riverThk,
-                                 0.35f, 0.55f, 0.85f, 0.9f, riverTex, ru0, rv0, ru1, rv1);
+                                 0.45f, 0.65f, 0.92f, 0.9f, riverTex, ru0, rv0, ru1, rv1);
                     }
                     if (plot.isWOfRiver) {
                         // Vertical river strip along west edge
-                        float ru0 = (float)x * 0.3f;
-                        float rv0 = (float)y * 0.5f + timeS;
-                        float ru1 = ru0 + 0.15f;
-                        float rv1 = rv0 + 0.5f;
+                        float ru0 = 0.0f;
+                        float rv0 = (float)y + timeS;
+                        float ru1 = 1.0f;
+                        float rv1 = rv0 + 1.0f;
                         pushQuad(screenTX - riverThk * 0.5f, screenTY, riverThk, screenTileSize,
-                                 0.35f, 0.55f, 0.85f, 0.9f, riverTex, ru0, rv0, ru1, rv1);
+                                 0.45f, 0.65f, 0.92f, 0.9f, riverTex, ru0, rv0, ru1, rv1);
                     }
                 }
             }
@@ -1349,13 +1505,13 @@ void GLRenderer::drawTerrain(const MapSnapshot& snapshot) {
                          plot.ownerColorR / 255.0f, plot.ownerColorG / 255.0f, plot.ownerColorB / 255.0f, fogAlpha);
             }
 
-            // Hills: subtle shadow overlay for depth
+            // Hills: brownish shadow overlay for depth
             if (plot.plotType == 1) {
-                pushQuad(screenTX, screenTY, screenTileSize, screenTileSize, 0, 0, 0, 0.12f);
+                pushQuad(screenTX, screenTY, screenTileSize, screenTileSize, 0.25f, 0.18f, 0.08f, 0.25f);
             }
-            // Peaks: slight snow-cap brightening
+            // Peaks: cold-tinted snow-cap brightening
             if (plot.plotType == 0) {
-                pushQuad(screenTX, screenTY, screenTileSize, screenTileSize, 0.9f, 0.92f, 0.95f, 0.15f);
+                pushQuad(screenTX, screenTY, screenTileSize, screenTileSize, 0.85f, 0.88f, 1.0f, 0.25f);
             }
 
             // Grid
@@ -1967,27 +2123,43 @@ void GLRenderer::handleKeyDown(SDL_Keycode key, MapSnapshot& snapshot) {
                     cmd.id = snapshot.selectedUnitID;
                     m_pushCommand(cmd);
                 } else if (snapshot.width > 0) {
-                    autoFitCamera(snapshot);
+                    if (m_use3DTerrain) autoFitCamera3D(snapshot);
+                    else autoFitCamera(snapshot);
                 }
             }
             break;
         case SDLK_HOME:
             {
                 std::lock_guard<std::mutex> lock(snapshot.mtx);
-                if (snapshot.width > 0) autoFitCamera(snapshot);
+                if (snapshot.width > 0) {
+                    if (m_use3DTerrain) autoFitCamera3D(snapshot);
+                    else autoFitCamera(snapshot);
+                }
             }
             break;
         case SDLK_PAGEUP:
-            m_camera.tiltAngle = std::min(m_camera.tiltAngle + 0.1f, 1.3f);
+            if (m_use3DTerrain)
+                m_cam3D.elevation = std::min(m_cam3D.elevation + 0.1f, 1.5f);
+            else
+                m_camera.tiltAngle = std::min(m_camera.tiltAngle + 0.1f, 1.3f);
             break;
         case SDLK_PAGEDOWN:
-            m_camera.tiltAngle = std::max(m_camera.tiltAngle - 0.1f, 0.0f);
+            if (m_use3DTerrain)
+                m_cam3D.elevation = std::max(m_cam3D.elevation - 0.1f, 0.1f);
+            else
+                m_camera.tiltAngle = std::max(m_camera.tiltAngle - 0.1f, 0.0f);
             break;
         case SDLK_q:
-            m_camera.rotationAngle -= 0.15f;
+            if (m_use3DTerrain)
+                m_cam3D.azimuth -= 0.15f;
+            else
+                m_camera.rotationAngle -= 0.15f;
             break;
         case SDLK_e:
-            m_camera.rotationAngle += 0.15f;
+            if (m_use3DTerrain)
+                m_cam3D.azimuth += 0.15f;
+            else
+                m_camera.rotationAngle += 0.15f;
             break;
         case SDLK_c:
             {
@@ -2054,14 +2226,21 @@ void GLRenderer::handleKeyUp(SDL_Keycode key) {
 }
 
 void GLRenderer::handleMouseWheel(int y, int mouseX, int mouseY) {
-    float oldZoom = m_camera.zoom;
-    if (y > 0) m_camera.zoom *= 1.15f;
-    else if (y < 0) m_camera.zoom /= 1.15f;
-    m_camera.zoom = std::max(0.1f, std::min(m_camera.zoom, 20.0f));
-    float worldMouseX = mouseX / oldZoom + m_camera.offsetX;
-    float worldMouseY = mouseY / oldZoom + m_camera.offsetY;
-    m_camera.offsetX = worldMouseX - mouseX / m_camera.zoom;
-    m_camera.offsetY = worldMouseY - mouseY / m_camera.zoom;
+    if (m_use3DTerrain) {
+        // 3D: zoom by changing distance
+        if (y > 0) m_cam3D.distance /= 1.15f;
+        else if (y < 0) m_cam3D.distance *= 1.15f;
+        m_cam3D.distance = std::max(2.0f, std::min(m_cam3D.distance, 150.0f));
+    } else {
+        float oldZoom = m_camera.zoom;
+        if (y > 0) m_camera.zoom *= 1.15f;
+        else if (y < 0) m_camera.zoom /= 1.15f;
+        m_camera.zoom = std::max(0.1f, std::min(m_camera.zoom, 20.0f));
+        float worldMouseX = mouseX / oldZoom + m_camera.offsetX;
+        float worldMouseY = mouseY / oldZoom + m_camera.offsetY;
+        m_camera.offsetX = worldMouseX - mouseX / m_camera.zoom;
+        m_camera.offsetY = worldMouseY - mouseY / m_camera.zoom;
+    }
 }
 
 void GLRenderer::handleMouseMotion(int dx, int dy, bool rightDrag, bool middleDrag) {
@@ -2069,16 +2248,29 @@ void GLRenderer::handleMouseMotion(int dx, int dy, bool rightDrag, bool middleDr
     SDL_GetMouseState(&mx, &my);
     m_mouseX = mx;
     m_mouseY = my;
-    if (middleDrag) {
-        // Middle-mouse drag: rotate camera (horizontal = Y rotation, vertical = tilt)
-        m_camera.rotationAngle += dx * 0.005f;
-        m_camera.tiltAngle -= dy * 0.005f;
-        // Clamp tilt: 0.0 = top-down, ~1.3 = nearly side-on
-        m_camera.tiltAngle = std::max(0.0f, std::min(m_camera.tiltAngle, 1.3f));
-    } else if (rightDrag) {
-        // Right-mouse drag: pan camera
-        m_camera.offsetX -= dx / m_camera.zoom;
-        m_camera.offsetY -= dy / m_camera.zoom;
+    if (m_use3DTerrain) {
+        if (middleDrag) {
+            // Middle-mouse drag: orbit camera
+            m_cam3D.azimuth += dx * 0.005f;
+            m_cam3D.elevation -= dy * 0.005f;
+            m_cam3D.elevation = std::max(0.1f, std::min(m_cam3D.elevation, 1.5f));
+        } else if (rightDrag) {
+            // Right-mouse drag: pan focal point
+            float panScale = m_cam3D.distance * 0.002f;
+            float cosAz = cosf(m_cam3D.azimuth);
+            float sinAz = sinf(m_cam3D.azimuth);
+            m_cam3D.focalX -= (cosAz * dx + sinAz * dy) * panScale;
+            m_cam3D.focalZ -= (-sinAz * dx + cosAz * dy) * panScale;
+        }
+    } else {
+        if (middleDrag) {
+            m_camera.rotationAngle += dx * 0.005f;
+            m_camera.tiltAngle -= dy * 0.005f;
+            m_camera.tiltAngle = std::max(0.0f, std::min(m_camera.tiltAngle, 1.3f));
+        } else if (rightDrag) {
+            m_camera.offsetX -= dx / m_camera.zoom;
+            m_camera.offsetY -= dy / m_camera.zoom;
+        }
     }
 }
 
